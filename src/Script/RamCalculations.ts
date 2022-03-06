@@ -15,6 +15,9 @@ import { Script } from "../Script/Script";
 import { WorkerScript } from "../Netscript/WorkerScript";
 import { areImportsEquals } from "../Terminal/DirectoryHelpers";
 import { IPlayer } from "../PersonObjects/IPlayer";
+import { RecursiveVisitors } from "acorn-walk";
+import _ from "lodash";
+import {Player} from "../Player";
 
 export interface RamUsageEntry {
   type: 'ns' | 'dom' | 'fn' | 'misc';
@@ -35,6 +38,12 @@ const specialReferenceWHILE = "__SPECIAL_referenceWhile";
 
 // The global scope of a script is registered under this key during parsing.
 const memCheckGlobalKey = ".__GLOBAL__";
+
+interface ParseResult {
+  additionalModules: string[];
+  dependencyMap: DependencyMap;
+}
+type DependencyMap = { [key: string]: Set<string> | undefined };
 
 /**
  * Parses code into an AST and walks through it recursively to calculate
@@ -290,7 +299,7 @@ export function checkInfiniteLoop(code: string): number {
  * for RAM usage calculations. It also returns an array of additional modules
  * that need to be parsed (i.e. are 'import'ed scripts).
  */
-function parseOnlyCalculateDeps(code: string, currentModule: string): any {
+function parseOnlyCalculateDeps(code: string, currentModule: string): ParseResult {
   const ast = parse(code, { sourceType: "module", ecmaVersion: "latest" });
   // Everything from the global scope goes in ".". Everything else goes in ".function", where only
   // the outermost layer of functions counts.
@@ -398,6 +407,114 @@ function parseOnlyCalculateDeps(code: string, currentModule: string): any {
   );
 
   return { dependencyMap: dependencyMap, additionalModules: additionalModules };
+}
+
+type ImportedModule = { path: string; alias: string; imports: string[] }
+type CalledFunction = { namespace: string; name: string }
+
+type ParseResults = {
+  importedModules: ImportedModule[];
+  nsFunctionsCalled: CalledFunction[];
+  functionsCalled: CalledFunction[];
+}
+
+type TState = any;
+
+class CurrentParseState {
+  nsFunctionsCalled: CalledFunction[] = [];
+  functionsCalled: CalledFunction[] = [];
+  importedModules: ImportedModule[] = [];
+
+  recordFunction(name: string, namespace: string): void {
+    const fn: CalledFunction = { namespace, name };
+    // Check whether there is a namespace at all - and whether the function has an expected name
+    const fns = (namespace==this.getNsNamespace()) ? this.nsFunctionsCalled : this.functionsCalled;
+    fns.push(fn);
+  }
+
+  recordFunctionDeclaration(name: string): void {
+    // @todo record this, and add current function to state so we can record what gets called from it
+  }
+
+  getNsNamespace(): string { return "ns"; }
+
+  toParseResults(): ParseResults {
+    return { importedModules: this.importedModules, nsFunctionsCalled: this.nsFunctionsCalled, functionsCalled: this.functionsCalled };
+  }
+}
+
+// The Acorn definition of Node omits these
+interface FullNode extends acorn.Node {
+  callee: FullNode;
+  body: FullNode;
+  name: string;
+  object: FullNode;
+  property: FullNode;
+}
+
+/**
+ * Record all the functions defined in a Netscript file, and all the functions that is invoked in turn by those functions, and the
+ * other libraries imported by the script.
+ *
+ * This allows us to follow the trail of functions to find all that are potentially executed from one starting point, so the cost of
+ * each executed NS function can be calculated.
+ *
+ * Note that the logic to work out whether a given function call invokes one of the standard NS functions is simply "is it a namespaced
+ * reference to a known function name" - so, a call to a "hack" function on a locally defined object will be a false positive.
+ * @todo Can we exclude calls to functions defined on locally defined classes?
+ *
+ * @todo How do class definitions work with the parser?
+ */
+export class NetscriptParser {
+  parseScript(code: string): ParseResults {
+    const ast = parse(code, { sourceType: "module", ecmaVersion: "latest" });
+    const state = new CurrentParseState();
+    walk.recursive(ast, state, this.parsingFunctions());
+    return state.toParseResults();
+  }
+
+  parsingFunctions(): RecursiveVisitors<TState> {
+    let parseFns = {};
+    parseFns = Object.assign(
+      {
+        ImportDeclaration: (node: acorn.Node, state: CurrentParseState) =>
+          // @todo Should just record this in the state to be handled separately
+          this.parseImport(node, state),
+        CallExpression: (node: FullNode, state: CurrentParseState) => {
+          const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] : [node.callee.property.name, node.callee.object.name];
+          state.recordFunction(fnName, fnNamespace);
+        },
+        FunctionDeclaration: (node: FullNode, state: CurrentParseState) => {
+          console.log("GOT HERE!");
+          // @todo Is this right to get the name?
+          const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] : [node.callee.property.name, node.callee.object.name];
+          state.recordFunctionDeclaration(fnName);
+          walk.recursive(node.body, state, parseFns)
+          // @todo Remove the current function from the state
+        },
+      });
+    return parseFns;
+  }
+
+  parseImport(node: any, state: CurrentParseState) {
+    // @todo This function is not useful
+    return null;
+  }
+}
+
+export function calculateCost(parseResults: ParseResults): RamCalculation {
+  const uniqueFunctionCalls = _.uniqWith(parseResults.nsFunctionsCalled, _.isEqual);
+  // @todo type is wrong, name probably has a prefix, cost doesn't work for things like hacknet or corporation
+  const entries: RamUsageEntry[] = uniqueFunctionCalls.map(fn => { return { type: "ns", name: fn.name, cost: RamCosts[fn.name] ?? 0 }; });
+  // @todo Base cost is included in the RamUsageEntry list, so can get from that
+  const cost = RamCostConstants.ScriptBaseRamCost + _.sum( entries.map(r => r.cost ));
+  return { cost, entries };
+}
+
+export function newCalculateRamUsage(player: IPlayer, codeCopy: string, otherScripts: Script[]): RamCalculation {
+  const p = new NetscriptParser();
+  const result = p.parseScript(codeCopy);
+  return calculateCost(result);
 }
 
 /**
