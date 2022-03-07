@@ -214,7 +214,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       const libCode = `
         export function dummy() { return 0; }
       `;
-      const lib = new Script(Player, "libTest.js", libCode, []);
+      const lib = new Script(null, "libTest.js", libCode, []);
 
       const code = `
         import { dummy } from "libTest";
@@ -230,7 +230,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       const libCode = `
         export async function doHack(ns) { return await ns.hack("joesguns"); }
       `;
-      const lib = new Script(Player, "libTest.js", libCode, []);
+      const lib = new Script(null, "libTest.js", libCode, []);
 
       const code = `
         import { doHack } from "libTest";
@@ -248,7 +248,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
         export async function doHack(ns) { return await ns.hack("joesguns"); }
         export async function doGrow(ns) { return await ns.grow("joesguns"); }
       `;
-      const lib = new Script(Player, "libTest.js", libCode, []);
+      const lib = new Script(null, "libTest.js", libCode, []);
 
       const code = `
         import { doHack } from "libTest";
@@ -265,7 +265,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
         export async function doHack(ns) { return await ns.hack("joesguns"); }
         export async function doGrow(ns) { return await ns.grow("joesguns"); }
       `;
-      const lib = new Script(Player, "libTest.js", libCode, []);
+      const lib = new Script(null, "libTest.js", libCode, []);
 
       const code = `
         import * as test from "libTest";
@@ -286,7 +286,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           async doGrow() { return await this.ns.grow("joesguns"); }
         }
       `;
-      const lib = new Script(Player, "libTest.js", libCode, []);
+      const lib = new Script(null, "libTest.js", libCode, []);
 
       const code = `
         import * as test from "libTest";
@@ -309,7 +309,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
             return Grower;
           }
         `;
-        const lib = new Script(Player, "libTest.js", libCode, []);
+        const lib = new Script(null, "libTest.js", libCode, []);
 
         const code = `
           import { createClass } from "libTest";
@@ -329,7 +329,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       const libTestCode = `
         export async function doHack(ns) { return await ns.hack("joesguns"); }
       `;
-      const libTest = new Script(Player, "libTest.js", libTestCode, []);
+      const libTest = new Script(null, "libTest.js", libTestCode, []);
 
       const code = `
         import { doHack } from "libTest";
@@ -337,14 +337,14 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await doHack(ns);
         }
       `;
-      const libCode = new Script(Player, "libCode.js", code, []);
+      const libCode = new Script(null, "libCode.js", code, []);
 
       const initial = `
           import { main2 } from "libCode";
           export async function main(notNS) {
             const ns = {
-              hack: () => 0;
-              grow: () => 0;
+              hack: () => 0,
+              grow: () => 0
             };
             await main2(ns);
           }
@@ -433,7 +433,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
         export async function doHack(ns) { return await ns.hack("joesguns"); }
         export async function doGrow(ns) { return await ns.grow("joesguns"); }
       `;
-      const lib = new Script(Player, "libTest.js", libCode, []);
+      const lib = new Script(null, "libTest.js", libCode, []);
 
       const code = `
         import { doHack } from "libTest";
@@ -454,7 +454,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
         export async function doHack(ns) { return await ns.hack("joesguns"); }
         export async function doGrow(ns) { return await ns.grow("joesguns"); }
       `;
-      const lib = new Script(Player, "libTest.js", libCode, []);
+      const lib = new Script(null, "libTest.js", libCode, []);
 
       const code = `
         import { doHack } from "libTest";
