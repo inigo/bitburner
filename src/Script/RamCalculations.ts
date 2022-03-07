@@ -410,47 +410,77 @@ function parseOnlyCalculateDeps(code: string, currentModule: string): ParseResul
 }
 
 type ImportedModule = { path: string; alias: string; imports: string[] }
-type CalledFunction = { namespace: string; name: string }
-
-type ParseResults = {
-  importedModules: ImportedModule[];
-  nsFunctionsCalled: CalledFunction[];
-  functionsCalled: CalledFunction[];
-}
+type DefinedFunction = { name: string; namespace: string; filePath: string }
+type FunctionTreeNode = { fn: DefinedFunction; calledFunctions: DefinedFunction[] }
+type ParseResults = { importedModules: ImportedModule[]; functionTree: FunctionTreeNode[] }
 
 type TState = any;
 
 class CurrentParseState {
-  nsFunctionsCalled: CalledFunction[] = [];
-  functionsCalled: CalledFunction[] = [];
-  importedModules: ImportedModule[] = [];
+  #functionTree: FunctionTreeNode[] = [];
+  #importedModules: ImportedModule[] = [];
 
-  recordFunction(name: string, namespace: string): void {
-    const fn: CalledFunction = { namespace, name };
-    // Check whether there is a namespace at all - and whether the function has an expected name
-    const fns = (namespace==this.getNsNamespace()) ? this.nsFunctionsCalled : this.functionsCalled;
-    fns.push(fn);
+  #currentFilePath = "";
+
+  // -----
+  // While within a function, accumulate onward function calls, and at the end of the function create a FunctionTreeNode from the function and what it invokes
+  // @todo We only care about this chunk of state inside a FunctionDeclaration - maybe separate out into its own state object? Check how classes work first
+  #currentFunction: (DefinedFunction | null) = null;
+  #currentCalledFunctions: DefinedFunction[] = [];
+
+  startFunction(name: string, namespace: string): void {
+    this.#currentFunction = { name, namespace, filePath: this.#currentFilePath };
+    this.#currentCalledFunctions = [];
+  }
+  recordFunctionCall(name: string, namespace: string): void {
+    const fn: DefinedFunction = { name, namespace, filePath: this.#currentFilePath };
+    this.#currentCalledFunctions.push(fn);
+  }
+  endFunction(): void {
+    const newNode: FunctionTreeNode = { fn: this.#currentFunction as DefinedFunction, calledFunctions: this.#currentCalledFunctions }
+    this.#functionTree.push(newNode);
+    this.#currentFunction = null;
+    this.#currentCalledFunctions = [];
   }
 
-  recordFunctionDeclaration(name: string): void {
-    // @todo record this, and add current function to state so we can record what gets called from it
-  }
+  // -----
 
-  getNsNamespace(): string { return "ns"; }
+  recordImport(path: string, alias: string, imports: string[]): void {
+    this.#importedModules.push({ path, alias, imports});
+  }
 
   toParseResults(): ParseResults {
-    return { importedModules: this.importedModules, nsFunctionsCalled: this.nsFunctionsCalled, functionsCalled: this.functionsCalled };
+    return { importedModules: this.#importedModules, functionTree: this.#functionTree };
   }
 }
+
 
 // The Acorn definition of Node omits these
 interface FullNode extends acorn.Node {
+  name: string;
+
   callee: FullNode;
   body: FullNode;
-  name: string;
   object: FullNode;
   property: FullNode;
+
+  value: string;
+  // Present on import specifiers
+  imported: FullNode;
+  local: FullNode;
 }
+
+interface FunctionDeclarationNode extends acorn.Node {
+  id: FullNode;
+  params: FullNode[];
+  body: FullNode;
+}
+
+interface ImportNode extends acorn.Node {
+  source: FullNode;
+  specifiers: FullNode[];
+}
+
 
 /**
  * Record all the functions defined in a Netscript file, and all the functions that is invoked in turn by those functions, and the
@@ -473,37 +503,53 @@ export class NetscriptParser {
     return state.toParseResults();
   }
 
-  parsingFunctions(): RecursiveVisitors<TState> {
-    let parseFns = {};
-    parseFns = Object.assign(
-      {
-        ImportDeclaration: (node: acorn.Node, state: CurrentParseState) =>
-          // @todo Should just record this in the state to be handled separately
-          this.parseImport(node, state),
-        CallExpression: (node: FullNode, state: CurrentParseState) => {
-          const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] : [node.callee.property.name, node.callee.object.name];
-          state.recordFunction(fnName, fnNamespace);
-        },
-        FunctionDeclaration: (node: FullNode, state: CurrentParseState) => {
-          console.log("GOT HERE!");
-          // @todo Is this right to get the name?
-          const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] : [node.callee.property.name, node.callee.object.name];
-          state.recordFunctionDeclaration(fnName);
-          walk.recursive(node.body, state, parseFns)
-          // @todo Remove the current function from the state
-        },
-      });
-    return parseFns;
+  /**
+   * Within a function declaration or class declaration, record calls made to other functions.
+   */
+  withinBlockParsing(): RecursiveVisitors<TState> {
+    const recordFunctionCalls = (node: FullNode, state: CurrentParseState): void => {
+      const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] : [node.callee.property.name, node.callee.object.name];
+      state.recordFunctionCall(fnName, fnNamespace);
+    }
+    return Object.assign({
+      CallExpression: recordFunctionCalls,
+      NewExpression: recordFunctionCalls
+    });
   }
 
-  parseImport(node: any, state: CurrentParseState) {
-    // @todo This function is not useful
-    return null;
+  parsingFunctions(): RecursiveVisitors<TState> {
+    const parseImport = (node: ImportNode, state: CurrentParseState): void => {
+      const sourcePath = node.source.value;
+      // Support either "import * as X from 'lib'" or "import { x, y } from 'lib'"
+      const isImportAll = !node.specifiers.at(0)?.imported;
+      if (isImportAll) {
+        const alias = node.specifiers.at(0)?.local.name ?? "";
+        state.recordImport(sourcePath, alias, ["*"]);
+      } else {
+        const imports = node.specifiers.map(n => n.imported.name);
+        state.recordImport(sourcePath, "", imports);
+      }
+    };
+
+    const parseFunctionOrClass = (node: FunctionDeclarationNode, state: CurrentParseState): void => {
+      const fnName = node.id.name;
+      state.startFunction(fnName, "");
+      walk.recursive(node.body, state, this.withinBlockParsing())
+      state.endFunction();
+    }
+
+    return Object.assign({
+      ImportDeclaration: parseImport,
+      FunctionDeclaration: parseFunctionOrClass,
+      ClassDeclaration: parseFunctionOrClass,
+    });
   }
+
 }
 
 export function calculateCost(parseResults: ParseResults): RamCalculation {
-  const uniqueFunctionCalls = _.uniqWith(parseResults.nsFunctionsCalled, _.isEqual);
+  // @todo This isn't right - we should have narrowed things down before this
+  const uniqueFunctionCalls = _.uniqWith(parseResults.functionTree.map(f => f.fn), _.isEqual);
   // @todo type is wrong, name probably has a prefix, cost doesn't work for things like hacknet or corporation
   const entries: RamUsageEntry[] = uniqueFunctionCalls.map(fn => { return { type: "ns", name: fn.name, cost: RamCosts[fn.name] ?? 0 }; });
   // @todo Base cost is included in the RamUsageEntry list, so can get from that

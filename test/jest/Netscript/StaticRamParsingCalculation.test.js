@@ -247,6 +247,11 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await doHack(ns);
         }
       `;
+
+      const p = new NetscriptParser();
+      const result = p.parseScript(code);
+      const cost = calculateCost(result);
+
       const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
       expectCost(calculated, HackCost);
     });
@@ -361,6 +366,81 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       const calculated = (await calculateRamUsage(Player, initial, [libCode, libTest])).cost;
       expectCost(calculated, HackCost);
     });
+
+  });
+
+
+  describe("Identifying imported modules", function () {
+    it("Import specific functions from a library", async function () {
+      const code = `
+        import { dummy, dummy2 } from "libTest";
+        export async function main(ns) {
+          dummy();
+        }
+      `;
+      const p = new NetscriptParser();
+      const result = p.parseScript(code);
+      expect(result.importedModules).toHaveLength(1);
+      expect(result.importedModules[0].path).toEqual("libTest");
+      expect(result.importedModules[0].alias).toEqual("");
+      expect(result.importedModules[0].imports).toEqual(["dummy", "dummy2"]);
+    });
+
+    it("Import all functions from a library", async function () {
+      const code = `
+        import * as dummy from "libTest";
+        export async function main(ns) {
+          dummy.things();
+        }
+      `;
+      const p = new NetscriptParser();
+      const result = p.parseScript(code);
+      expect(result.importedModules).toHaveLength(1);
+      expect(result.importedModules[0].path).toEqual("libTest");
+      expect(result.importedModules[0].alias).toEqual("dummy");
+      expect(result.importedModules[0].imports).toEqual(["*"]);
+    });
+
+  });
+
+
+  describe("Building a tree of called functions", function () {
+    it("Find functions inside a single file and their called functions", async function () {
+      const code = `
+        export async function main(ns) {
+          doHacking(ns);
+        }
+        async function doHacking(ns) {
+          await ns.hack("joesguns");
+        }
+      `;
+      const result = new NetscriptParser().parseScript(code);
+      expect(result.functionTree).toHaveLength(2);
+      expect(result.functionTree.map(f => f.fn.name)).toEqual(["main", "doHacking"]);
+      expect(result.functionTree[0].calledFunctions).toEqual([{ name: "doHacking", namespace: "", filePath: ""}]);
+      expect(result.functionTree[1].calledFunctions).toEqual([{ name: "hack", namespace: "ns", filePath: ""}]);
+    });
+
+    it("Find functions and classes inside a single file and their invocations", async function () {
+      const code = `
+        export async function main(ns) {
+          const c = new MyClass();
+          c.doHacking(ns);
+        }
+
+        class MyClass {
+          async doHacking(ns) {
+            await ns.hack("joesguns");
+          }
+        }
+      `;
+      const result = new NetscriptParser().parseScript(code);
+      expect(result.functionTree).toHaveLength(2);
+      expect(result.functionTree.map(f => f.fn.name)).toEqual(["main", "MyClass"]);
+      expect(result.functionTree[0].calledFunctions).toEqual([{ name: "MyClass", namespace: "", filePath: ""}, { name: "doHacking", namespace: "c", filePath: ""}]);
+      expect(result.functionTree[1].calledFunctions).toEqual([{ name: "hack", namespace: "ns", filePath: ""}]);
+    });
+
 
   });
 
