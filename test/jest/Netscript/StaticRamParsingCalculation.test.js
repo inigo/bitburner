@@ -211,6 +211,16 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, SleeveGetTaskCost);
     });
+
+    it("Singularity functions with variable costs depending on the player", async function () {
+      const code = `
+        export async function main(ns) {
+          ns.universityCourse("Summit University", "Networks");
+        }
+      `;
+      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      expectCost(calculated, RamCostConstants.ScriptSingularityFn1RamCost * 16);
+    });
   });
 
   describe("Imported files", function () {

@@ -38,12 +38,6 @@ const specialReferenceWHILE = "__SPECIAL_referenceWhile";
 // The global scope of a script is registered under this key during parsing.
 const memCheckGlobalKey = ".__GLOBAL__";
 
-interface ParseResult {
-  additionalModules: string[];
-  dependencyMap: DependencyMap;
-}
-type DependencyMap = { [key: string]: Set<string> | undefined };
-
 /**
  * Parses code into an AST and walks through it recursively to calculate
  * RAM usage. Also accounts for imported modules.
@@ -298,7 +292,7 @@ export function checkInfiniteLoop(code: string): number {
  * for RAM usage calculations. It also returns an array of additional modules
  * that need to be parsed (i.e. are 'import'ed scripts).
  */
-function parseOnlyCalculateDeps(code: string, currentModule: string): ParseResult {
+function parseOnlyCalculateDeps(code: string, currentModule: string): any {
   const ast = parse(code, { sourceType: "module", ecmaVersion: "latest" });
   // Everything from the global scope goes in ".". Everything else goes in ".function", where only
   // the outermost layer of functions counts.
@@ -501,7 +495,10 @@ export class NetscriptFileParser {
    */
   withinBlockParsing(): RecursiveVisitors<TState> {
     const recordFunctionCalls = (node: FullNode, state: WithinFunctionState): void => {
-      const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] : [node.callee.property.name, node.callee.object.name];
+      // This deals with function names like "doHack", then "ns.hacknet.doHack", then "ns.doHack"
+      const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] :
+        (node.callee?.object?.object?.name) ? [node.callee.property.name, node.callee.object.object.name +"."+node.callee.object.property.name] :
+        [node.callee.property.name, node.callee.object.name];
       state.recordFunctionCall(fnName, fnNamespace);
     }
     return Object.assign({
@@ -544,12 +541,35 @@ export class NetscriptFileParser {
 
 }
 
-export function calculateCost(functions: DefinedFunction[]): RamCalculation {
+export function calculateCost(player: IPlayer, functions: DefinedFunction[]): RamCalculation {
+  const specialKeyChecks: RamUsageEntry[] = [
+    {type: "ns", cost: RamCostConstants.ScriptHacknetNodesRamCost, name: "ns.hacknet"},
+    {type: "dom", cost: RamCostConstants.ScriptDomRamCost, name: "document"},
+    {type: "dom", cost: RamCostConstants.ScriptDomRamCost, name: "window"},
+    {type: "ns", cost: RamCostConstants.ScriptCorporationRamCost, name: "ns.corporation"},
+  ];
+
   const uniqueFunctions = _.uniqWith(functions, _.isEqual);
-  // @todo type is wrong, name probably has a prefix, cost doesn't work for things like hacknet or corporation
-  const entries: RamUsageEntry[] = uniqueFunctions.map(fn => { return { type: "ns", name: fn.name, cost: RamCosts[fn.name] ?? 0 }; });
-  // @todo Base cost is included in the RamUsageEntry list, so can get from that
-  const cost = RamCostConstants.ScriptBaseRamCost + _.sum( entries.map(r => r.cost ));
+  const entries: RamUsageEntry[] = uniqueFunctions.map(fn => {
+    const specialCost = specialKeyChecks.find(sk => fn.namespace==sk.name);
+    if (specialCost) return specialCost;
+    const splitNamespace = fn.namespace.split(".");
+
+    // This may be a number... or it may be a function, because singularity functions change cost depending on the player's source files
+    let cost: (number | {(p: IPlayer): number});
+    if (splitNamespace.length>1) {
+      const libPart = splitNamespace.at(-1) as string;
+      cost = RamCosts[libPart][fn.name] ?? 0;
+    } else {
+      cost = RamCosts[fn.name];
+    }
+    const actualCost = (typeof cost === "function") ? cost(player) : cost;
+    return { type: "ns", name: fn.name, cost: actualCost };
+  });
+
+  const baseCost: RamUsageEntry = { type: 'misc', name: 'baseCost', cost: RamCostConstants.ScriptBaseRamCost};
+  const entriesWithBase = [baseCost, ...entries]
+  const cost = _.sum( entriesWithBase.map(r => r.cost ));
   return { cost, entries };
 }
 
@@ -661,7 +681,7 @@ export function findAllCalledFunctions(modules: ParsedModule[], entryPoint: Defi
 export async function newCalculateRamUsage(player: IPlayer, codeCopy: string, otherScripts: Script[]): Promise<RamCalculation> {
   const parseResults = await new InvocationTreeBuilder().parseAll(codeCopy, otherScripts);
   const allCalledFunctions = findAllCalledFunctions(parseResults)
-  return calculateCost(allCalledFunctions.unresolvedFunctions);
+  return calculateCost(player, allCalledFunctions.unresolvedFunctions);
 }
 
 /**
