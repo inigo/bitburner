@@ -114,20 +114,6 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       expectCost(calculated, HackCost);
     });
 
-    it("Simple base NS functions in a referenced class", async function () {
-      const code = `
-        export async function main(ns) {
-          await new Hacker(ns).doHacking();
-        }
-        class Hacker {
-          #ns;
-          constructor(ns) { this.#ns = ns; }
-          async doHacking() { await this.#ns.hack("joesguns"); }
-        }
-      `;
-      const calculated = (await calculateRamUsage(Player, code, [])).cost;
-      expectCost(calculated, HackCost);
-    });
   });
 
 

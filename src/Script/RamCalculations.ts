@@ -166,17 +166,21 @@ export class NetscriptFileParser {
    * Within a function declaration or class declaration, record calls made to other functions.
    */
   withinBlockParsing(): RecursiveVisitors<TState> {
+    let visitor: (RecursiveVisitors<TState> | null) = null;
     const recordFunctionCalls = (node: FullNode, state: WithinFunctionParseState): void => {
-      // This deals with function names like "doHack", then "ns.hacknet.doHack", then "ns.doHack"
+      // This deals with function names like "doHack", then "ns.hacknet.doHack", then "ns.doHack", and "SomeClass.doHack"
       const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] :
         (node.callee?.object?.object?.name) ? [node.callee.property.name, node.callee.object.object.name +"."+node.callee.object.property.name] :
-        [node.callee.property.name, node.callee.object.name];
+        [node.callee.property.name, node.callee?.object?.name ?? node.callee?.object?.callee?.name ?? ""];
       state.recordFunctionCall(fnName, fnNamespace);
+      // The function call may have content within it - e.g. "new Hacker(ns).doHacking()" is a CallExpression containing a NewExpression
+      walk.recursive(node.callee, state, visitor as RecursiveVisitors<TState>);
     }
-    return Object.assign({
+    visitor = Object.assign({
       CallExpression: recordFunctionCalls,
       NewExpression: recordFunctionCalls
-    });
+    })
+    return visitor as RecursiveVisitors<TState>;
   }
 
   /**
