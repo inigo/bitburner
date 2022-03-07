@@ -5,7 +5,7 @@ import {describe, expect, jest} from "@jest/globals";
 import {Player} from "../../../src/Player";
 
 import {RamCostConstants} from "../../../src/Netscript/RamCostGenerator";
-import {calculateRamCost, calculateRamUsage, findAllCalledFunctions, InvocationTreeBuilder, NetscriptFileParser } from "../../../src/Script/RamCalculations";
+import {calculateRamUsage, findAllCalledFunctions, InvocationTreeBuilder, NetscriptFileParser} from "../../../src/Script/RamCalculations";
 import {Script} from "../../../src/Script/Script";
 
 jest.mock(`!!raw-loader!../NetscriptDefinitions.d.ts`, () => "", {
@@ -13,11 +13,11 @@ jest.mock(`!!raw-loader!../NetscriptDefinitions.d.ts`, () => "", {
 });
 
 const ScriptBaseCost = RamCostConstants.ScriptBaseRamCost;
-const HackCost = 0.1;
-const GrowCost = 0.15;
-const SleeveGetTaskCost = 4;
-const HacknetCost = 4;
-const CorpCost = 1024 - ScriptBaseCost;
+const HackCost = RamCostConstants.ScriptHackRamCost;
+const GrowCost = RamCostConstants.ScriptGrowRamCost;
+const SleeveGetTaskCost = RamCostConstants.ScriptSleeveBaseRamCost;
+const HacknetCost = RamCostConstants.ScriptHacknetNodesRamCost;
+const CorpCost = RamCostConstants.ScriptCorporationRamCost;
 
 describe("Parsing NetScript code to work out static RAM costs", function () {
   // Tests numeric equality, allowing for floating point imprecision - and includes script base cost
@@ -130,6 +130,20 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       expectCost(calculated, 0);
     });
 
+    it("Function 'get' on a class that can be confused with Stanek.get", async function () {
+      const code = `
+        export async function main(ns) {
+          const fake = new FakeStanek();
+          fake.get();
+        }
+        class FakeStanek {
+          get() { return 0; }
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
+      expectCost(calculated, 0);
+    });
+
     it("Function 'purchaseNode' that can be confused with Hacknet.purchaseNode", async function () {
       const code = `
         export async function main(ns) {
@@ -196,6 +210,16 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       `;
       const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, SleeveGetTaskCost);
+    });
+
+    it("Actual Stanek get call", async function () {
+      const code = `
+        export async function main(ns) {
+          ns.stanek.get(0, 0);
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
+      expectCost(calculated, RamCostConstants.ScriptStanekFragmentAt);
     });
 
     it("Singularity functions with variable costs depending on the player", async function () {

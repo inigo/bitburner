@@ -315,7 +315,6 @@ export function findAllCalledFunctions(modules: ParsedModule[], entryPoint: Defi
       newDependencies.forEach(d => toProcess.push(d));
     } else {
       // The function could not be resolved - which probably means it's an NS API function like ns.hack
-      // @todo Can we exclude calls to functions defined on locally defined classes?
       unresolvedFunctions.push(current);
     }
   }
