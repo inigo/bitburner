@@ -8,9 +8,7 @@
 import * as walk from "acorn-walk";
 import {RecursiveVisitors} from "acorn-walk";
 import acorn, {parse} from "acorn";
-
 import {RamCalculationErrorCode} from "./RamCalculationErrorCodes";
-
 import {RamCostConstants, RamCosts} from "../Netscript/RamCostGenerator";
 import {Script} from "./Script";
 import {areImportsEquals} from "../Terminal/DirectoryHelpers";
@@ -28,6 +26,10 @@ export interface RamCalculation {
   entries?: RamUsageEntry[];
 }
 
+/**
+ * Parse the AST, checking for loops that don't contain an "await" and are hence
+ * at risk of running infinitely. Used by the script editor, but not for RAM calculation.
+ */
 export function checkInfiniteLoop(code: string): number {
   const ast = parse(code, { sourceType: "module", ecmaVersion: "latest" });
 
@@ -71,10 +73,14 @@ type ImportedModule = { filePath: string; alias: string; imports: string[] }
 type DefinedFunction = { name: string; namespace: string; filePath: string }
 type FunctionTreeNode = { fn: DefinedFunction; calledFunctions: DefinedFunction[] }
 type ParsedModule = { filePath:string; importedModules: ImportedModule[]; functionTree: FunctionTreeNode[] }
-
+// This is part of the Acorn types
 type TState = any;
 
-class CurrentParseState {
+/**
+ * Stores state for the AST parser while parsing the top-level structure - i.e. function
+ * definitions and imports, but not the bodies of functions or classes.
+ */
+class TopLevelParseState {
   #functionTree: FunctionTreeNode[] = [];
   #importedModules: ImportedModule[] = [];
   constructor(readonly filePath: string) {}
@@ -85,17 +91,18 @@ class CurrentParseState {
   recordFunction(fn: FunctionTreeNode): void {
     this.#functionTree.push(fn);
   }
-
   toParseResults(): ParsedModule {
     return { filePath: this.filePath, importedModules: this.#importedModules, functionTree: this.#functionTree };
   }
 }
 
+
 /**
- * While within a function (or class), accumulate onward function calls, and at the end of the function create a FunctionTreeNode
- * from the function and what it invokes, that can be added to the parent state.
+ * Stores state while within a function (or class), accumulates onward function calls, and at the end
+ * of the function create a FunctionTreeNode from the function and what it invokes, that can be added
+ * to the parent TopLevelParseState.
  */
-class WithinFunctionState {
+class WithinFunctionParseState {
   #currentFunction: DefinedFunction;
   #currentCalledFunctions: DefinedFunction[] = [];
   constructor(readonly name: string, readonly namespace: string, readonly filePath: string) {
@@ -111,8 +118,12 @@ class WithinFunctionState {
 }
 
 
-// The Acorn definition of Node omits these - note that they aren't all present on all node types, but without either building a full type
-// structure for Acorn, or giving up and using "any" for everything, we can't do much better.
+/**
+ * A more complete definition of the Acorn Node - which represents a node in the JavaScript AST -
+ * with various field that Acorn omits. Note that they aren't all present on all node types, but
+ * without either building a full type structure for Acorn, or giving up and using "any" for
+ * everything, we can't do much better.
+ */
 interface FullNode extends acorn.Node {
   name: string;
   // Present on function invocations
@@ -135,22 +146,18 @@ interface FullNode extends acorn.Node {
 }
 
 /**
- * Record all the functions defined in a single Netscript file, and all the functions that is invoked in turn by those functions, and the
- * other libraries imported by the script.
+ * Record all the functions defined in a single Netscript file, and all the functions that is invoked
+ * in turn by those functions, and the other libraries imported by the script.
  *
- * This allows us to follow the trail of functions to find all that are potentially executed from one starting point, so the cost of
- * each executed NS function can be calculated.
- *
- * Note that the logic to work out whether a given function call invokes one of the standard NS functions is simply "is it a namespaced
- * reference to a known function name" - so, a call to a "hack" function on a locally defined object will be a false positive.
- * @todo Can we exclude calls to functions defined on locally defined classes?
+ * This allows us to follow the trail of functions to find all that are potentially executed from one
+ * starting point, so the cost of each executed NS function can be calculated.
  */
 export class NetscriptFileParser {
   constructor(readonly filePath: string) { }
 
   parseScript(code: string): ParsedModule {
     const ast = parse(code, { sourceType: "module", ecmaVersion: "latest" });
-    const state = new CurrentParseState(this.filePath);
+    const state = new TopLevelParseState(this.filePath);
     walk.recursive(ast, state, this.topLevelParsing());
     return state.toParseResults();
   }
@@ -159,7 +166,7 @@ export class NetscriptFileParser {
    * Within a function declaration or class declaration, record calls made to other functions.
    */
   withinBlockParsing(): RecursiveVisitors<TState> {
-    const recordFunctionCalls = (node: FullNode, state: WithinFunctionState): void => {
+    const recordFunctionCalls = (node: FullNode, state: WithinFunctionParseState): void => {
       // This deals with function names like "doHack", then "ns.hacknet.doHack", then "ns.doHack"
       const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] :
         (node.callee?.object?.object?.name) ? [node.callee.property.name, node.callee.object.object.name +"."+node.callee.object.property.name] :
@@ -177,7 +184,7 @@ export class NetscriptFileParser {
    * and class/function declarations (so we know what gets defined and invoked).
    */
   topLevelParsing(): RecursiveVisitors<TState> {
-    const parseImport = (node: FullNode, state: CurrentParseState): void => {
+    const parseImport = (node: FullNode, state: TopLevelParseState): void => {
       const sourcePath = node.source.value;
       // Support either "import * as X from 'lib'" or "import { x, y } from 'lib'"
       const isImportAll = !node.specifiers.at(0)?.imported;
@@ -190,9 +197,9 @@ export class NetscriptFileParser {
       }
     };
 
-    const parseFunctionOrClass = (node: FullNode, state: CurrentParseState): void => {
+    const parseFunctionOrClass = (node: FullNode, state: TopLevelParseState): void => {
       const fnName = node.id.name;
-      const fnState = new WithinFunctionState(fnName, "", this.filePath);
+      const fnState = new WithinFunctionParseState(fnName, "", this.filePath);
       walk.recursive(node.body, fnState, this.withinBlockParsing())
       state.recordFunction(fnState.endFunction());
     }
@@ -203,43 +210,6 @@ export class NetscriptFileParser {
       ClassDeclaration: parseFunctionOrClass,
     });
   }
-
-}
-
-export function calculateCost(player: IPlayer, functions: DefinedFunction[]): RamCalculation {
-  const specialKeyChecks: RamUsageEntry[] = [
-    {type: "ns", cost: RamCostConstants.ScriptHacknetNodesRamCost, name: "ns.hacknet"},
-    {type: "dom", cost: RamCostConstants.ScriptDomRamCost, name: "document"},
-    {type: "dom", cost: RamCostConstants.ScriptDomRamCost, name: "window"},
-    {type: "ns", cost: RamCostConstants.ScriptCorporationRamCost, name: "ns.corporation"},
-  ];
-
-  const uniqueFunctions = _.uniqWith(functions, _.isEqual);
-  const entries: RamUsageEntry[] = uniqueFunctions.map(fn => {
-    const specialCost = specialKeyChecks.find(sk => fn.namespace==sk.name);
-    if (specialCost) return specialCost;
-    const splitNamespace = fn.namespace.split(".");
-
-    // This may be a number... or it may be a function, because singularity functions change cost depending on the player's source files
-    let cost: (number | {(p: IPlayer): number});
-    if (splitNamespace.length>1) {
-      const libPart = splitNamespace.at(-1) as string;
-      cost = RamCosts[libPart][fn.name] ?? 0;
-    } else {
-      cost = RamCosts[fn.name];
-    }
-    const actualCost = (typeof cost === "function") ? cost(player) : cost;
-    return { type: "ns", name: fn.name, cost: actualCost };
-  });
-
-  const baseCost: RamUsageEntry = { type: 'misc', name: 'baseCost', cost: RamCostConstants.ScriptBaseRamCost};
-  const entriesWithBase = [baseCost, ...entries]
-  const cost = _.sum( entriesWithBase.map(r => r.cost ));
-  return { cost, entries };
-}
-
-class RamCalculationException {
-  constructor(readonly code: RamCalculationErrorCode, readonly message?: string) {}
 }
 
 
@@ -304,6 +274,11 @@ export class InvocationTreeBuilder {
 
 type FunctionCalls = { resolvedFunctions: DefinedFunction[]; unresolvedFunctions: DefinedFunction[] };
 
+
+/**
+ * Given an initial function, find all the functions that are called transitively starting from that function, returning them
+ * as either "resolvedFunctions" that we have the definition for, or "unresolvedFunctions" for which we have no definition.
+ */
 export function findAllCalledFunctions(modules: ParsedModule[], entryPoint: DefinedFunction = {name: "main", namespace: "", filePath: ""}): FunctionCalls {
   const resolvedFunctions: DefinedFunction[] = [];
   const unresolvedFunctions: DefinedFunction[] = [];
@@ -336,6 +311,7 @@ export function findAllCalledFunctions(modules: ParsedModule[], entryPoint: Defi
       newDependencies.forEach(d => toProcess.push(d));
     } else {
       // The function could not be resolved - which probably means it's an NS API function like ns.hack
+      // @todo Can we exclude calls to functions defined on locally defined classes?
       unresolvedFunctions.push(current);
     }
   }
@@ -343,11 +319,48 @@ export function findAllCalledFunctions(modules: ParsedModule[], entryPoint: Defi
 }
 
 
+function calculateRamCost(player: IPlayer, functions: DefinedFunction[]): RamCalculation {
+  const specialKeyChecks: RamUsageEntry[] = [
+    {type: "ns", cost: RamCostConstants.ScriptHacknetNodesRamCost, name: "ns.hacknet"},
+    {type: "dom", cost: RamCostConstants.ScriptDomRamCost, name: "document"},
+    {type: "dom", cost: RamCostConstants.ScriptDomRamCost, name: "window"},
+    {type: "ns", cost: RamCostConstants.ScriptCorporationRamCost, name: "ns.corporation"},
+  ];
+
+  const uniqueFunctions = _.uniqWith(functions, _.isEqual);
+  const entries: RamUsageEntry[] = uniqueFunctions.map(fn => {
+    const specialCost = specialKeyChecks.find(sk => fn.namespace==sk.name);
+    if (specialCost) return specialCost;
+    const splitNamespace = fn.namespace.split(".");
+
+    // This may be a number... or it may be a function, because singularity functions change cost depending on the player's source files
+    let cost: (number | {(p: IPlayer): number});
+    if (splitNamespace.length>1) {
+      const libPart = splitNamespace.at(-1) as string;
+      cost = RamCosts[libPart][fn.name] ?? 0;
+    } else {
+      cost = RamCosts[fn.name];
+    }
+    const actualCost = (typeof cost === "function") ? cost(player) : cost;
+    return { type: "ns", name: fn.name, cost: actualCost };
+  });
+
+  const baseCost: RamUsageEntry = { type: 'misc', name: 'baseCost', cost: RamCostConstants.ScriptBaseRamCost};
+  const entriesWithBase = [baseCost, ...entries]
+  const cost = _.sum( entriesWithBase.map(r => r.cost ));
+  return { cost, entries };
+}
+
+class RamCalculationException {
+  constructor(readonly code: RamCalculationErrorCode, readonly message?: string) {}
+}
+
+
 export async function calculateRamUsage(player: IPlayer, codeCopy: string, otherScripts: Script[]): Promise<RamCalculation> {
   try {
     const parseResults = await new InvocationTreeBuilder().parseAll(codeCopy, otherScripts);
     const allCalledFunctions = findAllCalledFunctions(parseResults)
-    return calculateCost(player, allCalledFunctions.unresolvedFunctions);
+    return calculateRamCost(player, allCalledFunctions.unresolvedFunctions);
   } catch (error: any) {
     const errorCode = error?.code ?? RamCalculationErrorCode.SyntaxError;
     return { cost: errorCode };

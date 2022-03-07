@@ -5,7 +5,7 @@ import {describe, expect, jest} from "@jest/globals";
 import {Player} from "../../../src/Player";
 
 import {RamCostConstants} from "../../../src/Netscript/RamCostGenerator";
-import {calculateCost, calculateRamUsage, findAllCalledFunctions, InvocationTreeBuilder, NetscriptFileParser } from "../../../src/Script/RamCalculations";
+import {calculateRamCost, calculateRamUsage, findAllCalledFunctions, InvocationTreeBuilder, NetscriptFileParser } from "../../../src/Script/RamCalculations";
 import {Script} from "../../../src/Script/Script";
 
 jest.mock(`!!raw-loader!../NetscriptDefinitions.d.ts`, () => "", {
@@ -252,10 +252,6 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await doHack(ns);
         }
       `;
-
-      const p = new NetscriptFileParser();
-      const result = p.parseScript(code);
-      const cost = calculateCost(result);
 
       const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
       expectCost(calculated, HackCost);
