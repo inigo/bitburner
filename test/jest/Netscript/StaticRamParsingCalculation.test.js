@@ -325,7 +325,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
     });
 
 
-    it("Imported function with NS defined", async function () {
+    it("Imported function with NS defined in an attempt to confuse", async function () {
       const libTestCode = `
         export async function doHack(ns) { return await ns.hack("joesguns"); }
       `;
@@ -351,7 +351,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       `;
 
       const calculated = (await calculateRamUsage(Player, initial, [libCode, libTest])).cost;
-      expectCost(calculated, HackCost);
+      expectCost(calculated, HackCost); // This is actually wrong, since the NS API hack is never called, but it's a reasonable mistake
     });
 
   });
