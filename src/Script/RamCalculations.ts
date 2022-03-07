@@ -544,11 +544,10 @@ export class NetscriptFileParser {
 
 }
 
-export function calculateCost(parseResults: ParsedModule): RamCalculation {
-  // @todo This isn't right - we should have narrowed things down before this
-  const uniqueFunctionCalls = _.uniqWith(parseResults.functionTree.map(f => f.fn), _.isEqual);
+export function calculateCost(functions: DefinedFunction[]): RamCalculation {
+  const uniqueFunctions = _.uniqWith(functions, _.isEqual);
   // @todo type is wrong, name probably has a prefix, cost doesn't work for things like hacknet or corporation
-  const entries: RamUsageEntry[] = uniqueFunctionCalls.map(fn => { return { type: "ns", name: fn.name, cost: RamCosts[fn.name] ?? 0 }; });
+  const entries: RamUsageEntry[] = uniqueFunctions.map(fn => { return { type: "ns", name: fn.name, cost: RamCosts[fn.name] ?? 0 }; });
   // @todo Base cost is included in the RamUsageEntry list, so can get from that
   const cost = RamCostConstants.ScriptBaseRamCost + _.sum( entries.map(r => r.cost ));
   return { cost, entries };
@@ -618,13 +617,51 @@ export class InvocationTreeBuilder {
   }
 }
 
+type FunctionCalls = { resolvedFunctions: DefinedFunction[]; unresolvedFunctions: DefinedFunction[] };
 
-export function newCalculateRamUsage(player: IPlayer, codeCopy: string, otherScripts: Script[]): RamCalculation {
-  const parseResults = new InvocationTreeBuilder().parseAll(codeCopy, otherScripts);
+export function findAllCalledFunctions(modules: ParsedModule[], entryPoint: DefinedFunction = {name: "main", namespace: "", filePath: ""}): FunctionCalls {
+  const resolvedFunctions: DefinedFunction[] = [];
+  const unresolvedFunctions: DefinedFunction[] = [];
+  const isAlreadyProcessed = (newFn: DefinedFunction): boolean => !!resolvedFunctions.find(cf => _.isEqual(newFn, cf)) || !!unresolvedFunctions.find(cf => _.isEqual(newFn, cf));
 
-  const p = new NetscriptFileParser("");
-  const result = p.parseScript(codeCopy);
-  return calculateCost(result);
+  const toProcess: DefinedFunction[] = [entryPoint];
+  while (toProcess.length > 0) {
+    // Get the definition of the function
+    const current = toProcess.shift() as DefinedFunction;
+    const currentModule = modules.find(m => m.filePath==current.filePath) as ParsedModule;
+    if (!currentModule) continue;
+
+    // The function being called may be in the current file, or it may be imported from another module, or it may not be defined (e.g. it is an NS API function)
+    const fnFromCurrentFile = currentModule?.functionTree.find(ft => _.isEqual(ft.fn, current) );
+    let currentFn = null;
+    if (fnFromCurrentFile!=null) {
+      currentFn = fnFromCurrentFile;
+    } else {
+      // Check the imports for the current module to find where the function comes from
+      const importReference = currentModule.importedModules.find(m => m.alias==current.namespace && (m.imports.includes(current.name) || m.imports.includes("*")) );
+      const importModule = modules.find(m => m.filePath == importReference?.filePath);
+      currentFn = importModule?.functionTree.find(ft => ft.fn.name==current.name && ft.fn.namespace=="" );
+    }
+
+    if (currentFn) {
+      // The function could be resolved to a definition elsewhere in the scripts - so record it and find its onward dependencies
+      const dependencies = currentFn?.calledFunctions ?? [];
+      const newDependencies = dependencies.filter(d => !isAlreadyProcessed(d));
+      resolvedFunctions.push(current);
+      newDependencies.forEach(d => toProcess.push(d));
+    } else {
+      // The function could not be resolved - which probably means it's an NS API function like ns.hack
+      unresolvedFunctions.push(current);
+    }
+  }
+  return {resolvedFunctions, unresolvedFunctions};
+}
+
+
+export async function newCalculateRamUsage(player: IPlayer, codeCopy: string, otherScripts: Script[]): Promise<RamCalculation> {
+  const parseResults = await new InvocationTreeBuilder().parseAll(codeCopy, otherScripts);
+  const allCalledFunctions = findAllCalledFunctions(parseResults)
+  return calculateCost(allCalledFunctions.unresolvedFunctions);
 }
 
 /**
