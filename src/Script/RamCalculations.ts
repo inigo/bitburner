@@ -6,18 +6,17 @@
  * the way
  */
 import * as walk from "acorn-walk";
-import acorn, { parse } from "acorn";
+import {RecursiveVisitors} from "acorn-walk";
+import acorn, {parse} from "acorn";
 
-import { RamCalculationErrorCode } from "./RamCalculationErrorCodes";
+import {RamCalculationErrorCode} from "./RamCalculationErrorCodes";
 
-import { RamCosts, RamCostConstants } from "../Netscript/RamCostGenerator";
-import { Script } from "../Script/Script";
-import { WorkerScript } from "../Netscript/WorkerScript";
-import { areImportsEquals } from "../Terminal/DirectoryHelpers";
-import { IPlayer } from "../PersonObjects/IPlayer";
-import { RecursiveVisitors } from "acorn-walk";
+import {RamCostConstants, RamCosts} from "../Netscript/RamCostGenerator";
+import {Script} from "../Script/Script";
+import {WorkerScript} from "../Netscript/WorkerScript";
+import {areImportsEquals} from "../Terminal/DirectoryHelpers";
+import {IPlayer} from "../PersonObjects/IPlayer";
 import _ from "lodash";
-import {Player} from "../Player";
 
 export interface RamUsageEntry {
   type: 'ns' | 'dom' | 'fn' | 'misc';
@@ -409,81 +408,75 @@ function parseOnlyCalculateDeps(code: string, currentModule: string): ParseResul
   return { dependencyMap: dependencyMap, additionalModules: additionalModules };
 }
 
-type ImportedModule = { path: string; alias: string; imports: string[] }
+type ImportedModule = { filePath: string; alias: string; imports: string[] }
 type DefinedFunction = { name: string; namespace: string; filePath: string }
 type FunctionTreeNode = { fn: DefinedFunction; calledFunctions: DefinedFunction[] }
-type ParseResults = { importedModules: ImportedModule[]; functionTree: FunctionTreeNode[] }
+type ParsedModule = { filePath:string; importedModules: ImportedModule[]; functionTree: FunctionTreeNode[] }
 
 type TState = any;
 
 class CurrentParseState {
   #functionTree: FunctionTreeNode[] = [];
   #importedModules: ImportedModule[] = [];
-
-  #currentFilePath = "";
-
-  // -----
-  // While within a function, accumulate onward function calls, and at the end of the function create a FunctionTreeNode from the function and what it invokes
-  // @todo We only care about this chunk of state inside a FunctionDeclaration - maybe separate out into its own state object? Check how classes work first
-  #currentFunction: (DefinedFunction | null) = null;
-  #currentCalledFunctions: DefinedFunction[] = [];
-
-  startFunction(name: string, namespace: string): void {
-    this.#currentFunction = { name, namespace, filePath: this.#currentFilePath };
-    this.#currentCalledFunctions = [];
-  }
-  recordFunctionCall(name: string, namespace: string): void {
-    const fn: DefinedFunction = { name, namespace, filePath: this.#currentFilePath };
-    this.#currentCalledFunctions.push(fn);
-  }
-  endFunction(): void {
-    const newNode: FunctionTreeNode = { fn: this.#currentFunction as DefinedFunction, calledFunctions: this.#currentCalledFunctions }
-    this.#functionTree.push(newNode);
-    this.#currentFunction = null;
-    this.#currentCalledFunctions = [];
-  }
-
-  // -----
+  constructor(readonly filePath: string) {}
 
   recordImport(path: string, alias: string, imports: string[]): void {
-    this.#importedModules.push({ path, alias, imports});
+    this.#importedModules.push({ filePath: path, alias, imports});
+  }
+  recordFunction(fn: FunctionTreeNode): void {
+    this.#functionTree.push(fn);
   }
 
-  toParseResults(): ParseResults {
-    return { importedModules: this.#importedModules, functionTree: this.#functionTree };
+  toParseResults(): ParsedModule {
+    return { filePath: this.filePath, importedModules: this.#importedModules, functionTree: this.#functionTree };
+  }
+}
+
+/**
+ * While within a function (or class), accumulate onward function calls, and at the end of the function create a FunctionTreeNode
+ * from the function and what it invokes, that can be added to the parent state.
+ */
+class WithinFunctionState {
+  #currentFunction: DefinedFunction;
+  #currentCalledFunctions: DefinedFunction[] = [];
+  constructor(readonly name: string, readonly namespace: string, readonly filePath: string) {
+    this.#currentFunction = { name, namespace, filePath: this.filePath };
+  }
+  recordFunctionCall(name: string, namespace: string): void {
+    const fn: DefinedFunction = { name, namespace, filePath: this.filePath };
+    this.#currentCalledFunctions.push(fn);
+  }
+  endFunction(): FunctionTreeNode {
+    return { fn: this.#currentFunction as DefinedFunction, calledFunctions: this.#currentCalledFunctions }
   }
 }
 
 
-// The Acorn definition of Node omits these
+// The Acorn definition of Node omits these - note that they aren't all present on all node types, but without either building a full type
+// structure for Acorn, or giving up and using "any" for everything, we can't do much better.
 interface FullNode extends acorn.Node {
   name: string;
-
+  // Present on function invocations
   callee: FullNode;
-  body: FullNode;
+  // Present on function callees
   object: FullNode;
   property: FullNode;
-
-  value: string;
+  // Present on anything with a body, like functions, classes, blocks
+  body: FullNode;
   // Present on import specifiers
   imported: FullNode;
   local: FullNode;
-}
-
-interface FunctionDeclarationNode extends acorn.Node {
+  // Present on function declarations
   id: FullNode;
   params: FullNode[];
-  body: FullNode;
-}
-
-interface ImportNode extends acorn.Node {
+  // Present on import nodes
   source: FullNode;
   specifiers: FullNode[];
+  value: string;
 }
 
-
 /**
- * Record all the functions defined in a Netscript file, and all the functions that is invoked in turn by those functions, and the
+ * Record all the functions defined in a single Netscript file, and all the functions that is invoked in turn by those functions, and the
  * other libraries imported by the script.
  *
  * This allows us to follow the trail of functions to find all that are potentially executed from one starting point, so the cost of
@@ -492,14 +485,14 @@ interface ImportNode extends acorn.Node {
  * Note that the logic to work out whether a given function call invokes one of the standard NS functions is simply "is it a namespaced
  * reference to a known function name" - so, a call to a "hack" function on a locally defined object will be a false positive.
  * @todo Can we exclude calls to functions defined on locally defined classes?
- *
- * @todo How do class definitions work with the parser?
  */
-export class NetscriptParser {
-  parseScript(code: string): ParseResults {
+export class NetscriptFileParser {
+  constructor(readonly filePath: string) { }
+
+  parseScript(code: string): ParsedModule {
     const ast = parse(code, { sourceType: "module", ecmaVersion: "latest" });
-    const state = new CurrentParseState();
-    walk.recursive(ast, state, this.parsingFunctions());
+    const state = new CurrentParseState(this.filePath);
+    walk.recursive(ast, state, this.topLevelParsing());
     return state.toParseResults();
   }
 
@@ -507,7 +500,7 @@ export class NetscriptParser {
    * Within a function declaration or class declaration, record calls made to other functions.
    */
   withinBlockParsing(): RecursiveVisitors<TState> {
-    const recordFunctionCalls = (node: FullNode, state: CurrentParseState): void => {
+    const recordFunctionCalls = (node: FullNode, state: WithinFunctionState): void => {
       const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] : [node.callee.property.name, node.callee.object.name];
       state.recordFunctionCall(fnName, fnNamespace);
     }
@@ -517,8 +510,12 @@ export class NetscriptParser {
     });
   }
 
-  parsingFunctions(): RecursiveVisitors<TState> {
-    const parseImport = (node: ImportNode, state: CurrentParseState): void => {
+  /**
+   * At the top level of a script file, record imports (so we know where else to go)
+   * and class/function declarations (so we know what gets defined and invoked).
+   */
+  topLevelParsing(): RecursiveVisitors<TState> {
+    const parseImport = (node: FullNode, state: CurrentParseState): void => {
       const sourcePath = node.source.value;
       // Support either "import * as X from 'lib'" or "import { x, y } from 'lib'"
       const isImportAll = !node.specifiers.at(0)?.imported;
@@ -531,11 +528,11 @@ export class NetscriptParser {
       }
     };
 
-    const parseFunctionOrClass = (node: FunctionDeclarationNode, state: CurrentParseState): void => {
+    const parseFunctionOrClass = (node: FullNode, state: CurrentParseState): void => {
       const fnName = node.id.name;
-      state.startFunction(fnName, "");
-      walk.recursive(node.body, state, this.withinBlockParsing())
-      state.endFunction();
+      const fnState = new WithinFunctionState(fnName, "", this.filePath);
+      walk.recursive(node.body, fnState, this.withinBlockParsing())
+      state.recordFunction(fnState.endFunction());
     }
 
     return Object.assign({
@@ -547,7 +544,7 @@ export class NetscriptParser {
 
 }
 
-export function calculateCost(parseResults: ParseResults): RamCalculation {
+export function calculateCost(parseResults: ParsedModule): RamCalculation {
   // @todo This isn't right - we should have narrowed things down before this
   const uniqueFunctionCalls = _.uniqWith(parseResults.functionTree.map(f => f.fn), _.isEqual);
   // @todo type is wrong, name probably has a prefix, cost doesn't work for things like hacknet or corporation
@@ -557,8 +554,75 @@ export function calculateCost(parseResults: ParseResults): RamCalculation {
   return { cost, entries };
 }
 
+class RamCalculationException {
+  constructor(readonly code: RamCalculationErrorCode, readonly message?: string) {}
+}
+
+
+/**
+ * Parse an initial script, and all the scripts that are connected to it via imports, to form a list of ParseResults
+ * that describe all the functions and classes that are defined or called from those scripts.
+ */
+export class InvocationTreeBuilder {
+  #parsedModules: ParsedModule[] = [];
+
+  async parseAll(initialCode: string, otherScripts: Script[]): Promise<ParsedModule[]> {
+    const result = InvocationTreeBuilder.parse(initialCode, "");
+    this.#parsedModules.push(result);
+
+    const modulesToParse: string[] = _.uniq(result.importedModules.map(m => m.filePath));
+    const alreadyParsedModulesFn = (): string[] => this.#parsedModules.map(m => m.filePath);
+    while (modulesToParse.length > 0) {
+      const pathToParse = modulesToParse.shift() as string;
+      const normalizedPath = pathToParse.startsWith("./") ? pathToParse.slice(2) : pathToParse;
+
+      if (alreadyParsedModulesFn().includes(normalizedPath)) { continue; }
+
+      let code = null;
+      if (pathToParse.startsWith("https://") || pathToParse.startsWith("http://")) {
+        // eslint-disable-next-line no-await-in-loop
+        code = await InvocationTreeBuilder.resolveExternalModule(pathToParse);
+      } else {
+        code = otherScripts.find(s => areImportsEquals(s.filename, normalizedPath))?.code;
+      }
+      if (code==null) throw new RamCalculationException(RamCalculationErrorCode.ImportError, `Imported module ${normalizedPath} can't be found`);
+
+      const result = InvocationTreeBuilder.parse(code, normalizedPath);
+      this.#parsedModules.push(result);
+      modulesToParse.push(...result.importedModules.map(m => m.filePath));
+    }
+
+    return this.#parsedModules;
+  }
+
+  private static parse(code: string, filePath: string): ParsedModule {
+    const p = new NetscriptFileParser(filePath);
+    return p.parseScript(code);
+  }
+
+  private static async resolveExternalModule(moduleUrl: string): Promise<string> {
+    try {
+      const module = await eval("import(moduleUrl)");
+      let code = "";
+      for (const prop in module) {
+        if (typeof module[prop] === "function") {
+          code += module[prop].toString() + ";\n";
+        }
+      }
+      return code;
+    } catch (e) {
+      const errorMsg = `Error dynamically importing module from ${moduleUrl} for RAM calculations: ${e}`;
+      console.error(errorMsg);
+      throw new RamCalculationException(RamCalculationErrorCode.URLImportError, errorMsg);
+    }
+  }
+}
+
+
 export function newCalculateRamUsage(player: IPlayer, codeCopy: string, otherScripts: Script[]): RamCalculation {
-  const p = new NetscriptParser();
+  const parseResults = new InvocationTreeBuilder().parseAll(codeCopy, otherScripts);
+
+  const p = new NetscriptFileParser("");
   const result = p.parseScript(codeCopy);
   return calculateCost(result);
 }
