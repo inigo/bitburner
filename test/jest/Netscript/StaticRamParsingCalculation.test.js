@@ -5,7 +5,7 @@ import {describe, expect, jest} from "@jest/globals";
 import {Player} from "../../../src/Player";
 
 import {RamCostConstants} from "../../../src/Netscript/RamCostGenerator";
-import {calculateCost, newCalculateRamUsage, findAllCalledFunctions, InvocationTreeBuilder, NetscriptFileParser, calculateRamUsage} from "../../../src/Script/RamCalculations";
+import {calculateCost, calculateRamUsage, findAllCalledFunctions, InvocationTreeBuilder, NetscriptFileParser } from "../../../src/Script/RamCalculations";
 import {Script} from "../../../src/Script/Script";
 
 jest.mock(`!!raw-loader!../NetscriptDefinitions.d.ts`, () => "", {
@@ -30,7 +30,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       const code = `
         export async function main(ns) { }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, 0);
     });
 
@@ -40,7 +40,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           ns.print("Slum snakes r00l!");
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, 0);
     });
 
@@ -50,7 +50,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await ns.hack("joesguns");
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, HackCost);
     });
 
@@ -60,7 +60,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await X.hack("joesguns");
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, HackCost);
     });
 
@@ -71,7 +71,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await ns.hack("joesguns");
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, HackCost);
     });
 
@@ -82,7 +82,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await ns.grow("joesguns");
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, HackCost + GrowCost);
     });
 
@@ -95,7 +95,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await ns.hack("joesguns");
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, HackCost);
     });
 
@@ -110,7 +110,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           async doHacking() { await this.ns.hack("joesguns"); }
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, HackCost);
     });
 
@@ -125,7 +125,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           async doHacking() { await this.#ns.hack("joesguns"); }
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, HackCost);
     });
   });
@@ -140,7 +140,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
         }
         function get() { return 0; }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, 0);
     });
 
@@ -151,7 +151,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
         }
         function purchaseNode() { return 0; }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       // Works at present, because the parser checks the namespace only, not the function name
       expectCost(calculated, 0);
     });
@@ -163,7 +163,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
         }
         function getTask() { return 0; }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, 0);
     });
   });
@@ -177,7 +177,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           ns.hacknet.purchaseNode(0);
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, HacknetCost);
     });
 
@@ -187,7 +187,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           ns.corporation.getCorporation();
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, CorpCost);
     });
 
@@ -198,7 +198,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           ns.hacknet.purchaseNode(0);
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, CorpCost+HacknetCost);
     });
 
@@ -208,7 +208,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           ns.sleeve.getTask(3);
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, SleeveGetTaskCost);
     });
 
@@ -218,7 +218,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           ns.universityCourse("Summit University", "Networks");
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, RamCostConstants.ScriptSingularityFn1RamCost * 16);
     });
   });
@@ -236,7 +236,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           dummy();
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [lib])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
       expectCost(calculated, 0);
     });
 
@@ -257,7 +257,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       const result = p.parseScript(code);
       const cost = calculateCost(result);
 
-      const calculated = (await newCalculateRamUsage(Player, code, [lib])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
       expectCost(calculated, HackCost);
     });
 
@@ -274,7 +274,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await doHack(ns);
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [lib])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
       expectCost(calculated, HackCost);
     });
 
@@ -291,7 +291,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await test.doHack(ns);
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [lib])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
       expectCost(calculated, HackCost);
     });
 
@@ -312,7 +312,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           await test.doHack(ns);
         }
       `;
-      const calculated = (await newCalculateRamUsage(Player, code, [lib])).cost;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
       expectCost(calculated, HackCost);
     });
 
@@ -338,7 +338,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
             await growerInstance.doGrow();
           }
         `;
-        const calculated = (await newCalculateRamUsage(Player, code, [lib])).cost;
+        const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
         expectCost(calculated, GrowCost);
     });
 
@@ -368,7 +368,7 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
           }
       `;
 
-      const calculated = (await newCalculateRamUsage(Player, initial, [libCode, libTest])).cost;
+      const calculated = (await calculateRamUsage(Player, initial, [libCode, libTest])).cost;
       expectCost(calculated, HackCost);
     });
 
