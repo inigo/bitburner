@@ -18,6 +18,9 @@ const GrowCost = RamCostConstants.ScriptGrowRamCost;
 const SleeveGetTaskCost = RamCostConstants.ScriptSleeveBaseRamCost;
 const HacknetCost = RamCostConstants.ScriptHacknetNodesRamCost;
 const CorpCost = RamCostConstants.ScriptCorporationRamCost;
+const StanekGetCost = RamCostConstants.ScriptStanekFragmentAt;
+const StanekWidthCost = RamCostConstants.ScriptStanekWidth;
+const DomCost = RamCostConstants.ScriptDomRamCost;
 
 describe("Parsing NetScript code to work out static RAM costs", function () {
   // Tests numeric equality, allowing for floating point imprecision - and includes script base cost
@@ -495,6 +498,121 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       expect(allCalledFunctions.unresolvedFunctions.map(r => r.name)).toEqual(["hack"]);
     });
 
+  });
+
+
+  describe("special namespaces work", function () {
+    it("Exporting an api to be used in another file", async function () {
+      // Note "window.blah()" is a function call, and is calculated correctly
+      // "window.blah" is not contained as a function call
+      const code = `
+      export async function main(ns) {
+        window.blah
+      }
+    `;
+      const calculated = (await calculateRamUsage(Player, code)).cost;
+      expectCost(calculated, DomCost);
+    });
+  });
+
+
+  describe("random false positive namespaces work", function () {
+    it("Exporting an api to be used in another file", async function () {
+      const code = `
+      export async function main(ns) {
+        billybob.get()
+      }
+    `;
+      const calculated = (await calculateRamUsage(Player, code)).cost;
+      expectCost(calculated, 0);
+    });
+  });
+
+
+  describe("Single files with import exported NS api namespaces", function () {
+    it("Exporting an api to be used in another file", async function () {
+      const libCode = `
+        export async function anExport(ns) { return ns.stanek }
+      `;
+      const lib = new Script(Player, "libTest.js", libCode, []);
+
+      const code = `
+        import {anExport} from "libTest.js";
+        export async function main(ns) {
+          await anExport(ns).get;
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
+      expectCost(calculated, StanekGetCost);
+    });
+
+    it("Exporting api methods to be used in another file", async function () {
+      const libCode = `
+        export async function anExport(ns) { return ns.stanek.get }
+        export async function anotherExport(ns) { return ns.stanek.width }
+      `;
+      const lib = new Script(Player, "libTest.js", libCode, []);
+
+      const code = `
+        import {anExport, anotherExport} from "libTest.js";
+        export async function main(ns) {
+          await anExport(ns);
+          await anotherExport(ns);
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
+      expectCost(calculated, StanekGetCost + StanekWidthCost);
+    });
+
+    it("Exporting api methods selectively import in another file", async function () {
+      const libCode = `
+        export async function anExport(ns) { return ns.stanek.get }
+        export async function anotherExport(ns) { return ns.stanek.width }
+      `;
+      const lib = new Script(Player, "libTest.js", libCode, []);
+
+      const code = `
+        import {anExport} from "libTest.js";
+        export async function main(ns) {
+          await anExport(ns);
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
+      expectCost(calculated, StanekGetCost);
+    });
+
+    it("Exporting all methods as a variable to be used in another file", async function () {
+      const libCode = `
+        export async function anExport(ns) { return ns.stanek.get }
+        export async function anotherExport(ns) { return ns.stanek.width }
+      `;
+      const lib = new Script(Player, "libTest.js", libCode, []);
+
+      const code = `
+        import libTest from "libTest.js";
+        export async function main(ns) {
+          await libTest.anExport(ns);
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
+      expectCost(calculated, StanekGetCost + StanekWidthCost);
+    });
+
+    it("Exporting api import as variable another file", async function () {
+      const libCode = `
+        export async function anExport(ns) { return ns.stanek }
+      `;
+      const lib = new Script(Player, "libTest.js", libCode, []);
+
+      const code = `
+        import libTest from "libTest.js";
+        export async function main(ns) {
+          await libTest.anExport(ns).get;
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [lib])).cost;
+      expectCost(calculated, StanekGetCost);
+    });
   });
 
 });

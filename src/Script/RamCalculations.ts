@@ -176,9 +176,16 @@ export class NetscriptFileParser {
       // The function call may have content within it - e.g. "new Hacker(ns).doHacking()" is a CallExpression containing a NewExpression
       walk.recursive(node.callee, state, visitor as RecursiveVisitors<TState>);
     }
+
+    const recordFunctionReference = (node: FullNode, state: WithinFunctionParseState): void => {
+      const [fnName, fnNamespace] = [node.property.name, node?.object?.name ?? ""];
+      state.recordFunctionCall(fnName, fnNamespace);
+    }
     visitor = Object.assign({
       CallExpression: recordFunctionCalls,
-      NewExpression: recordFunctionCalls
+      NewExpression: recordFunctionCalls,
+      // @todo Probably not the correct fix - revisit this
+      MemberExpression: recordFunctionReference
     })
     return visitor as RecursiveVisitors<TState>;
   }

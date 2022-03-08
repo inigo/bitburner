@@ -59,6 +59,8 @@ export const RamCostConstants: IMap<number> = {
 
   ScriptBladeburnerApiBaseRamCost: 4,
 
+  ScriptStanekWidth: 0.4,
+  ScriptStanekHeight: 0.4,
   ScriptStanekCharge: 0.4,
   ScriptStanekFragmentDefinitions: 0,
   ScriptStanekPlacedFragments: 5,
