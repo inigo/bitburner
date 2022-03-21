@@ -110,11 +110,19 @@ class WithinFunctionParseState {
   constructor(readonly name: string, readonly namespace: string, readonly filePath: string) {
     this.#currentFunction = { name, namespace, filePath: this.filePath };
   }
-  recordFunctionCall(name: string, providedNamespace: string): void {
-    const varReference = this.#variables.find(v => v.declarationName == providedNamespace);
-    const namespace = varReference ? varReference?.namespace + "." + varReference.name : providedNamespace;
-    const fn: DefinedFunction = { name, namespace, filePath: this.filePath };
-    this.#currentCalledFunctions.push(fn);
+  recordFunctionCall(providedName: string, providedNamespace: string): void {
+    if (providedNamespace!="") {
+      const varReference = this.#variables.find(v => v.declarationName == providedNamespace);
+      const namespace = varReference ? varReference?.namespace + "." + varReference.name : providedNamespace;
+      const fn: DefinedFunction = { name: providedName, namespace, filePath: this.filePath };
+      this.#currentCalledFunctions.push(fn);
+    } else {
+      const varReference = this.#variables.find(v => v.declarationName == providedName);
+      const namespace = varReference?.namespace ?? providedNamespace;
+      const name = varReference?.name ?? providedName;
+      const fn: DefinedFunction = { name, namespace, filePath: this.filePath };
+      this.#currentCalledFunctions.push(fn);
+    }
   }
   recordVariable(declarationName: string, name: string, namespace: string): void {
     const fn: DefinedVariable = { declarationName, name, namespace, filePath: this.filePath };
@@ -197,7 +205,7 @@ export class NetscriptFileParser {
 
       const names = node.id?.name ? [node.id.name] :  node.id.elements.map(n => n.name);
       if (node.init.property) {
-        const [fnName, fnNamespace] = [node.init.property.name, node.init.object?.name ?? ""];
+        const [fnName, fnNamespace] = [node.init.property.name, node.init.object?.name ?? node.init.object?.object?.name+"."+node.init.object?.property?.name ?? ""];
         state.recordVariable(names[0], fnName, fnNamespace);
       } else {
         node.init.elements.map((el, count) => {
