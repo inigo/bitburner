@@ -106,30 +106,37 @@ class TopLevelParseState {
 class WithinFunctionParseState {
   #currentFunction: DefinedFunction;
   #variables: DefinedVariable[] = [];
+  #returnValue: (DefinedFunction | null) = null;
   #currentCalledFunctions: DefinedFunction[] = [];
   constructor(readonly name: string, readonly namespace: string, readonly filePath: string) {
     this.#currentFunction = { name, namespace, filePath: this.filePath };
   }
   recordFunctionCall(providedName: string, providedNamespace: string): void {
-    if (providedNamespace!="") {
-      const varReference = this.#variables.find(v => v.declarationName == providedNamespace);
-      const namespace = varReference ? varReference?.namespace + "." + varReference.name : providedNamespace;
-      const fn: DefinedFunction = { name: providedName, namespace, filePath: this.filePath };
-      this.#currentCalledFunctions.push(fn);
-    } else {
-      const varReference = this.#variables.find(v => v.declarationName == providedName);
-      const namespace = varReference?.namespace ?? providedNamespace;
-      const name = varReference?.name ?? providedName;
-      const fn: DefinedFunction = { name, namespace, filePath: this.filePath };
-      this.#currentCalledFunctions.push(fn);
-    }
+    const fn: DefinedFunction = this.#lookupReference(providedName, providedNamespace);
+    this.#currentCalledFunctions.push(fn);
   }
   recordVariable(declarationName: string, name: string, namespace: string): void {
     const fn: DefinedVariable = { declarationName, name, namespace, filePath: this.filePath };
     this.#variables.push(fn);
   }
+  recordReturn(providedName: string, providedNamespace: string): void {
+    const fn: DefinedFunction = this.#lookupReference(providedName, providedNamespace);
+    this.#returnValue == fn;
+  }
   endFunction(): FunctionTreeNode {
     return { fn: this.#currentFunction as DefinedFunction, calledFunctions: this.#currentCalledFunctions }
+  }
+  #lookupReference(providedName: string, providedNamespace: string): DefinedFunction {
+    if (providedNamespace!="") {
+      const varReference = this.#variables.find(v => v.declarationName == providedNamespace);
+      const namespace = varReference ? varReference?.namespace + "." + varReference.name : providedNamespace;
+      return { name: providedName, namespace, filePath: this.filePath };
+    } else {
+      const varReference = this.#variables.find(v => v.declarationName == providedName);
+      const namespace = varReference?.namespace ?? providedNamespace;
+      const name = varReference?.name ?? providedName;
+      return {name, namespace, filePath: this.filePath};
+    }
   }
 }
 
@@ -152,6 +159,8 @@ interface FullNode extends acorn.Node {
   // Present on variable declarators
   init: FullNode;
   elements: FullNode[];
+  // Present on return values
+  argument: FullNode;
   // Present on import specifiers
   imported: FullNode;
   local: FullNode;
@@ -215,12 +224,17 @@ export class NetscriptFileParser {
         });
       }
     }
+
+    const recordReturn = (node: FullNode, state: WithinFunctionParseState): void => {
+      const [fnName, fnNamespace] = [node.argument.property.name, node.argument.object?.name ?? node.argument.object?.object?.name+"."+node.argument.object?.property?.name ?? ""];
+      state.recordReturn(fnName, fnNamespace);
+    }
+
     visitor = Object.assign({
       CallExpression: recordFunctionCalls,
       NewExpression: recordFunctionCalls,
-      // @todo Probably not the correct fix - revisit this
       VariableDeclarator: recordReference,
-      // MemberExpression: recordReference,
+      ReturnStatement: recordReturn,
     })
     return visitor as RecursiveVisitors<TState>;
   }
