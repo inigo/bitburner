@@ -71,6 +71,7 @@ export function checkInfiniteLoop(code: string): number {
 
 type ImportedModule = { filePath: string; alias: string; imports: string[] }
 type DefinedFunction = { name: string; namespace: string; filePath: string }
+type DefinedVariable = { declarationName: string, name: string; namespace: string; filePath: string }
 type FunctionTreeNode = { fn: DefinedFunction; calledFunctions: DefinedFunction[] }
 type ParsedModule = { filePath:string; importedModules: ImportedModule[]; functionTree: FunctionTreeNode[] }
 // This is part of the Acorn types
@@ -104,13 +105,20 @@ class TopLevelParseState {
  */
 class WithinFunctionParseState {
   #currentFunction: DefinedFunction;
+  #variables: DefinedVariable[] = [];
   #currentCalledFunctions: DefinedFunction[] = [];
   constructor(readonly name: string, readonly namespace: string, readonly filePath: string) {
     this.#currentFunction = { name, namespace, filePath: this.filePath };
   }
-  recordFunctionCall(name: string, namespace: string): void {
+  recordFunctionCall(name: string, providedNamespace: string): void {
+    const varReference = this.#variables.find(v => v.declarationName == providedNamespace);
+    const namespace = varReference ? varReference?.namespace + "." + varReference.name : providedNamespace;
     const fn: DefinedFunction = { name, namespace, filePath: this.filePath };
     this.#currentCalledFunctions.push(fn);
+  }
+  recordVariable(declarationName: string, name: string, namespace: string): void {
+    const fn: DefinedVariable = { declarationName, name, namespace, filePath: this.filePath };
+    this.#variables.push(fn);
   }
   endFunction(): FunctionTreeNode {
     return { fn: this.#currentFunction as DefinedFunction, calledFunctions: this.#currentCalledFunctions }
@@ -133,6 +141,9 @@ interface FullNode extends acorn.Node {
   property: FullNode;
   // Present on anything with a body, like functions, classes, blocks
   body: FullNode;
+  // Present on variable declarators
+  init: FullNode;
+  elements: FullNode[];
   // Present on import specifiers
   imported: FullNode;
   local: FullNode;
@@ -177,15 +188,31 @@ export class NetscriptFileParser {
       walk.recursive(node.callee, state, visitor as RecursiveVisitors<TState>);
     }
 
-    const recordFunctionReference = (node: FullNode, state: WithinFunctionParseState): void => {
-      const [fnName, fnNamespace] = [node.property.name, node?.object?.name ?? ""];
-      state.recordFunctionCall(fnName, fnNamespace);
+    const recordReference = (node: FullNode, state: WithinFunctionParseState): void => {
+      const subType = node.init.type;
+      if (subType!="ArrayExpression" && subType!="MemberExpression") {
+        walk.recursive(node.init, state, visitor as RecursiveVisitors<TState>);
+        return;
+      }
+
+      const names = node.id?.name ? [node.id.name] :  node.id.elements.map(n => n.name);
+      if (node.init.property) {
+        const [fnName, fnNamespace] = [node.init.property.name, node.init.object?.name ?? ""];
+        state.recordVariable(names[0], fnName, fnNamespace);
+      } else {
+        node.init.elements.map((el, count) => {
+          const [fnName, fnNamespace] = [el.property.name, el.object?.name ?? ""];
+          const declarationName = names[count];
+          state.recordVariable(declarationName, fnName, fnNamespace);
+        });
+      }
     }
     visitor = Object.assign({
       CallExpression: recordFunctionCalls,
       NewExpression: recordFunctionCalls,
       // @todo Probably not the correct fix - revisit this
-      MemberExpression: recordFunctionReference
+      VariableDeclarator: recordReference,
+      // MemberExpression: recordReference,
     })
     return visitor as RecursiveVisitors<TState>;
   }
@@ -367,12 +394,12 @@ class RamCalculationException {
 
 
 export async function calculateRamUsage(player: IPlayer, codeCopy: string, otherScripts: Script[]): Promise<RamCalculation> {
-  try {
+  // try {
     const parseResults = await new InvocationTreeBuilder().parseAll(codeCopy, otherScripts);
     const allCalledFunctions = findAllCalledFunctions(parseResults)
     return calculateRamCost(player, allCalledFunctions.unresolvedFunctions);
-  } catch (error: any) {
-    const errorCode = error?.code ?? RamCalculationErrorCode.SyntaxError;
-    return { cost: errorCode };
-  }
+  // } catch (error: any) {
+  //   const errorCode = error?.code ?? RamCalculationErrorCode.SyntaxError;
+  //   return { cost: errorCode };
+  // }
 }

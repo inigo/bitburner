@@ -169,6 +169,16 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, 0);
     });
+
+    it("Random false positive namespaces", async function () {
+      const code = `
+      export async function main(ns) {
+        billybob.get()
+      }
+    `;
+      const calculated = (await calculateRamUsage(Player, code)).cost;
+      expectCost(calculated, 0);
+    });
   });
 
 
@@ -225,6 +235,53 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       expectCost(calculated, RamCostConstants.ScriptStanekFragmentAt);
     });
 
+    it("Reference to namespace based on a variable", async function () {
+      const code = `
+        export async function main(ns) {
+          const stn = ns.stanek;
+          stn.get(0, 0);
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
+      expectCost(calculated, RamCostConstants.ScriptStanekFragmentAt);
+    });
+
+    it("Reference to namespace based on a variable destructuring pattern", async function () {
+      const code = `
+        export async function main(ns) {
+          const [stn,stn2] = [ns.stanek, ns.stanek];
+          stn2.get(0, 0);
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
+      expectCost(calculated, RamCostConstants.ScriptStanekFragmentAt);
+    });
+
+    it("Calling a variable reference", async function () {
+      const code = `
+        export async function main(ns) {
+          const stnGet = ns.stanek.get;
+          stnGet(0, 0);
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
+      expectCost(calculated, RamCostConstants.ScriptStanekFragmentAt);
+    });
+
+    it("Calling a variable reference from another function", async function () {
+      const code = `
+        export async function main(ns) {
+          returnNamespace(ns).get(0, 0);
+        }
+
+        function returnNamespace(ns) {
+          return ns.stanek;
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
+      expectCost(calculated, RamCostConstants.ScriptStanekFragmentAt);
+    });
+
     it("Singularity functions with variable costs depending on the player", async function () {
       const code = `
         export async function main(ns) {
@@ -233,6 +290,15 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       `;
       const calculated = (await calculateRamUsage(Player, code, [])).cost;
       expectCost(calculated, RamCostConstants.ScriptSingularityFn1RamCost * 16);
+    });
+    it("DOM references", async function () {
+      const code = `
+        export async function main(ns) {
+          document.getElementById("something");
+        }
+      `;
+      const calculated = (await calculateRamUsage(Player, code, [])).cost;
+      expectCost(calculated, RamCostConstants.ScriptDomRamCost);
     });
   });
 
@@ -498,34 +564,6 @@ describe("Parsing NetScript code to work out static RAM costs", function () {
       expect(allCalledFunctions.unresolvedFunctions.map(r => r.name)).toEqual(["hack"]);
     });
 
-  });
-
-
-  describe("special namespaces work", function () {
-    it("Exporting an api to be used in another file", async function () {
-      // Note "window.blah()" is a function call, and is calculated correctly
-      // "window.blah" is not contained as a function call
-      const code = `
-      export async function main(ns) {
-        window.blah
-      }
-    `;
-      const calculated = (await calculateRamUsage(Player, code)).cost;
-      expectCost(calculated, DomCost);
-    });
-  });
-
-
-  describe("random false positive namespaces work", function () {
-    it("Exporting an api to be used in another file", async function () {
-      const code = `
-      export async function main(ns) {
-        billybob.get()
-      }
-    `;
-      const calculated = (await calculateRamUsage(Player, code)).cost;
-      expectCost(calculated, 0);
-    });
   });
 
 
