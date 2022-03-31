@@ -6,15 +6,14 @@
  * the way
  */
 import * as walk from "acorn-walk";
-import acorn, { parse } from "acorn";
-
-import { RamCalculationErrorCode } from "./RamCalculationErrorCodes";
-
-import { RamCosts, RamCostConstants } from "../Netscript/RamCostGenerator";
-import { Script } from "../Script/Script";
-import { WorkerScript } from "../Netscript/WorkerScript";
-import { areImportsEquals } from "../Terminal/DirectoryHelpers";
-import { IPlayer } from "../PersonObjects/IPlayer";
+import {RecursiveVisitors} from "acorn-walk";
+import acorn, {parse} from "acorn";
+import {RamCalculationErrorCode} from "./RamCalculationErrorCodes";
+import {RamCostConstants, RamCosts} from "../Netscript/RamCostGenerator";
+import {Script} from "./Script";
+import {areImportsEquals} from "../Terminal/DirectoryHelpers";
+import {IPlayer} from "../PersonObjects/IPlayer";
+import _ from "lodash";
 
 export interface RamUsageEntry {
   type: 'ns' | 'dom' | 'fn' | 'misc';
@@ -27,224 +26,10 @@ export interface RamCalculation {
   entries?: RamUsageEntry[];
 }
 
-// These special strings are used to reference the presence of a given logical
-// construct within a user script.
-const specialReferenceIF = "__SPECIAL_referenceIf";
-const specialReferenceFOR = "__SPECIAL_referenceFor";
-const specialReferenceWHILE = "__SPECIAL_referenceWhile";
-
-// The global scope of a script is registered under this key during parsing.
-const memCheckGlobalKey = ".__GLOBAL__";
-
 /**
- * Parses code into an AST and walks through it recursively to calculate
- * RAM usage. Also accounts for imported modules.
- * @param {Script[]} otherScripts - All other scripts on the server. Used to account for imported scripts
- * @param {string} codeCopy - The code being parsed
- * @param {WorkerScript} workerScript - Object containing RAM costs of Netscript functions. Also used to
- *                                      keep track of what functions have/havent been accounted for
+ * Parse the AST, checking for loops that don't contain an "await" and are hence
+ * at risk of running infinitely. Used by the script editor, but not for RAM calculation.
  */
-async function parseOnlyRamCalculate(
-  player: IPlayer,
-  otherScripts: Script[],
-  code: string,
-  workerScript: WorkerScript,
-): Promise<RamCalculation> {
-  try {
-    /**
-     * Maps dependent identifiers to their dependencies.
-     *
-     * The initial identifier is __SPECIAL_INITIAL_MODULE__.__GLOBAL__.
-     * It depends on all the functions declared in the module, all the global scopes
-     * of its imports, and any identifiers referenced in this global scope. Each
-     * function depends on all the identifiers referenced internally.
-     * We walk the dependency graph to calculate RAM usage, given that some identifiers
-     * reference Netscript functions which have a RAM cost.
-     */
-    let dependencyMap: { [key: string]: string[] } = {};
-
-    // Scripts we've parsed.
-    const completedParses = new Set();
-
-    // Scripts we've discovered that need to be parsed.
-    const parseQueue: string[] = [];
-
-    // Parses a chunk of code with a given module name, and updates parseQueue and dependencyMap.
-    function parseCode(code: string, moduleName: string): void {
-      const result = parseOnlyCalculateDeps(code, moduleName);
-      completedParses.add(moduleName);
-
-      // Add any additional modules to the parse queue;
-      for (let i = 0; i < result.additionalModules.length; ++i) {
-        if (!completedParses.has(result.additionalModules[i])) {
-          parseQueue.push(result.additionalModules[i]);
-        }
-      }
-
-      // Splice all the references in
-      dependencyMap = Object.assign(dependencyMap, result.dependencyMap);
-    }
-
-    // Parse the initial module, which is the "main" script that is being run
-    const initialModule = "__SPECIAL_INITIAL_MODULE__";
-    parseCode(code, initialModule);
-
-    // Process additional modules, which occurs if the "main" script has any imports
-    while (parseQueue.length > 0) {
-      const nextModule = parseQueue.shift();
-      if (nextModule === undefined) throw new Error("nextModule should not be undefined");
-
-      // Additional modules can either be imported from the web (in which case we use
-      // a dynamic import), or from other in-game scripts
-      let code;
-      if (nextModule.startsWith("https://") || nextModule.startsWith("http://")) {
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          const module = await eval("import(nextModule)");
-          code = "";
-          for (const prop in module) {
-            if (typeof module[prop] === "function") {
-              code += module[prop].toString() + ";\n";
-            }
-          }
-        } catch (e) {
-          console.error(`Error dynamically importing module from ${nextModule} for RAM calculations: ${e}`);
-          return { cost: RamCalculationErrorCode.URLImportError };
-        }
-      } else {
-        if (!Array.isArray(otherScripts)) {
-          console.warn(`parseOnlyRamCalculate() not called with array of scripts`);
-          return { cost: RamCalculationErrorCode.ImportError };
-        }
-
-        let script = null;
-        const fn = nextModule.startsWith("./") ? nextModule.slice(2) : nextModule;
-        for (const s of otherScripts) {
-          if (areImportsEquals(s.filename, fn)) {
-            script = s;
-            break;
-          }
-        }
-
-        if (script == null) {
-          return { cost: RamCalculationErrorCode.ImportError }; // No such script on the server
-        }
-
-        code = script.code;
-      }
-
-      parseCode(code, nextModule);
-    }
-
-    // Finally, walk the reference map and generate a ram cost. The initial set of keys to scan
-    // are those that start with __SPECIAL_INITIAL_MODULE__.
-    let ram = RamCostConstants.ScriptBaseRamCost;
-    const detailedCosts: RamUsageEntry[] = [{ type: 'misc', name: 'baseCost', cost: RamCostConstants.ScriptBaseRamCost}];
-    const unresolvedRefs = Object.keys(dependencyMap).filter((s) => s.startsWith(initialModule));
-    const resolvedRefs = new Set();
-    while (unresolvedRefs.length > 0) {
-      const ref = unresolvedRefs.shift();
-      if (ref === undefined) throw new Error("ref should not be undefined");
-
-      // Check if this is one of the special keys, and add the appropriate ram cost if so.
-      if (ref === "hacknet" && !resolvedRefs.has("hacknet")) {
-        ram += RamCostConstants.ScriptHacknetNodesRamCost;
-        detailedCosts.push({ type: 'ns', name: 'hacknet', cost: RamCostConstants.ScriptHacknetNodesRamCost});
-      }
-      if (ref === "document" && !resolvedRefs.has("document")) {
-        ram += RamCostConstants.ScriptDomRamCost;
-        detailedCosts.push({ type: 'dom', name: 'document', cost: RamCostConstants.ScriptDomRamCost});
-      }
-      if (ref === "window" && !resolvedRefs.has("window")) {
-        ram += RamCostConstants.ScriptDomRamCost;
-        detailedCosts.push({ type: 'dom', name: 'window', cost: RamCostConstants.ScriptDomRamCost});
-      }
-      if (ref === "corporation" && !resolvedRefs.has("corporation")) {
-        ram += RamCostConstants.ScriptCorporationRamCost;
-        detailedCosts.push({ type: 'ns', name: 'corporation', cost: RamCostConstants.ScriptCorporationRamCost});
-      }
-
-      resolvedRefs.add(ref);
-
-      if (ref.endsWith(".*")) {
-        // A prefix reference. We need to find all matching identifiers.
-        const prefix = ref.slice(0, ref.length - 2);
-        for (const ident of Object.keys(dependencyMap).filter((k) => k.startsWith(prefix))) {
-          for (const dep of dependencyMap[ident] || []) {
-            if (!resolvedRefs.has(dep)) unresolvedRefs.push(dep);
-          }
-        }
-      } else {
-        // An exact reference. Add all dependencies of this ref.
-        for (const dep of dependencyMap[ref] || []) {
-          if (!resolvedRefs.has(dep)) unresolvedRefs.push(dep);
-        }
-      }
-
-      // Check if this identifier is a function in the workerScript environment.
-      // If it is, then we need to get its RAM cost.
-      try {
-        function applyFuncRam(cost: any): number {
-          if (typeof cost === "number") {
-            return cost;
-          } else if (typeof cost === "function") {
-            return cost(player);
-          } else {
-            return 0;
-          }
-        }
-
-        // Only count each function once
-        if (workerScript.loadedFns[ref]) {
-          continue;
-        } else {
-          workerScript.loadedFns[ref] = true;
-        }
-
-        // This accounts for namespaces (Bladeburner, CodingCpntract, etc.)
-        let func;
-        let refDetail = 'n/a';
-        if (ref in workerScript.env.vars.bladeburner) {
-          func = workerScript.env.vars.bladeburner[ref];
-          refDetail = `bladeburner.${ref}`;
-        } else if (ref in workerScript.env.vars.codingcontract) {
-          func = workerScript.env.vars.codingcontract[ref];
-          refDetail = `codingcontract.${ref}`;
-        } else if (ref in workerScript.env.vars.stanek) {
-          func = workerScript.env.vars.stanek[ref];
-          refDetail = `stanek.${ref}`;
-        } else if (ref in workerScript.env.vars.gang) {
-          func = workerScript.env.vars.gang[ref];
-          refDetail = `gang.${ref}`;
-        } else if (ref in workerScript.env.vars.sleeve) {
-          func = workerScript.env.vars.sleeve[ref];
-          refDetail = `sleeve.${ref}`;
-        } else if (ref in workerScript.env.vars.stock) {
-          func = workerScript.env.vars.stock[ref];
-          refDetail = `stock.${ref}`;
-        } else if (ref in workerScript.env.vars.ui) {
-          func = workerScript.env.vars.ui[ref];
-          refDetail = `ui.${ref}`;
-        } else {
-          func = workerScript.env.vars[ref];
-          refDetail = `${ref}`;
-        }
-        const fnRam = applyFuncRam(func);
-        ram += fnRam;
-        detailedCosts.push({ type: 'fn', name: refDetail, cost: fnRam});
-      } catch (error) {
-        continue;
-      }
-    }
-    return { cost: ram, entries: detailedCosts.filter(e => e.cost > 0) };
-  } catch (error) {
-    // console.info("parse or eval error: ", error);
-    // This is not unexpected. The user may be editing a script, and it may be in
-    // a transitory invalid state.
-    return { cost: RamCalculationErrorCode.SyntaxError };
-  }
-}
-
 export function checkInfiniteLoop(code: string): number {
   const ast = parse(code, { sourceType: "module", ecmaVersion: "latest" });
 
@@ -284,149 +69,359 @@ export function checkInfiniteLoop(code: string): number {
   return missingAwaitLine;
 }
 
+type ImportedModule = { filePath: string; alias: string; imports: string[] }
+type DefinedFunction = { name: string; namespace: string; filePath: string }
+type DefinedVariable = { declarationName: string, name: string; namespace: string; filePath: string }
+type FunctionTreeNode = { fn: DefinedFunction; calledFunctions: DefinedFunction[] }
+type ParsedModule = { filePath:string; importedModules: ImportedModule[]; functionTree: FunctionTreeNode[] }
+// This is part of the Acorn types
+type TState = any;
+
 /**
- * Helper function that parses a single script. It returns a map of all dependencies,
- * which are items in the code's AST that potentially need to be evaluated
- * for RAM usage calculations. It also returns an array of additional modules
- * that need to be parsed (i.e. are 'import'ed scripts).
+ * Stores state for the AST parser while parsing the top-level structure - i.e. function
+ * definitions and imports, but not the bodies of functions or classes.
  */
-function parseOnlyCalculateDeps(code: string, currentModule: string): any {
-  const ast = parse(code, { sourceType: "module", ecmaVersion: "latest" });
-  // Everything from the global scope goes in ".". Everything else goes in ".function", where only
-  // the outermost layer of functions counts.
-  const globalKey = currentModule + memCheckGlobalKey;
-  const dependencyMap: { [key: string]: Set<string> | undefined } = {};
-  dependencyMap[globalKey] = new Set<string>();
+class TopLevelParseState {
+  #functionTree: FunctionTreeNode[] = [];
+  #importedModules: ImportedModule[] = [];
+  constructor(readonly filePath: string) {}
 
-  // If we reference this internal name, we're really referencing that external name.
-  // Filled when we import names from other modules.
-  const internalToExternal: { [key: string]: string | undefined } = {};
+  recordImport(path: string, alias: string, imports: string[]): void {
+    this.#importedModules.push({ filePath: path, alias, imports});
+  }
+  recordFunction(fn: FunctionTreeNode): void {
+    this.#functionTree.push(fn);
+  }
+  toParseResults(): ParsedModule {
+    return { filePath: this.filePath, importedModules: this.#importedModules, functionTree: this.#functionTree };
+  }
+}
 
-  const additionalModules: string[] = [];
 
-  // References get added pessimistically. They are added for thisModule.name, name, and for
-  // any aliases.
-  function addRef(key: string, name: string): void {
-    const s = dependencyMap[key] || (dependencyMap[key] = new Set());
-    const external = internalToExternal[name];
-    if (external !== undefined) {
-      s.add(external);
+/**
+ * Stores state while within a function (or class), accumulates onward function calls, and at the end
+ * of the function create a FunctionTreeNode from the function and what it invokes, that can be added
+ * to the parent TopLevelParseState.
+ */
+class WithinFunctionParseState {
+  #currentFunction: DefinedFunction;
+  #variables: DefinedVariable[] = [];
+  #returnValue: (DefinedFunction | null) = null;
+  #currentCalledFunctions: DefinedFunction[] = [];
+  constructor(readonly name: string, readonly namespace: string, readonly filePath: string) {
+    this.#currentFunction = { name, namespace, filePath: this.filePath };
+  }
+  recordFunctionCall(providedName: string, providedNamespace: string): void {
+    const fn: DefinedFunction = this.#lookupReference(providedName, providedNamespace);
+    this.#currentCalledFunctions.push(fn);
+  }
+  recordVariable(declarationName: string, name: string, namespace: string): void {
+    const fn: DefinedVariable = { declarationName, name, namespace, filePath: this.filePath };
+    this.#variables.push(fn);
+  }
+  recordReturn(providedName: string, providedNamespace: string): void {
+    const fn: DefinedFunction = this.#lookupReference(providedName, providedNamespace);
+    this.#returnValue == fn;
+  }
+  endFunction(): FunctionTreeNode {
+    return { fn: this.#currentFunction as DefinedFunction, calledFunctions: this.#currentCalledFunctions }
+  }
+  #lookupReference(providedName: string, providedNamespace: string): DefinedFunction {
+    if (providedNamespace!="") {
+      const varReference = this.#variables.find(v => v.declarationName == providedNamespace);
+      const namespace = varReference ? varReference?.namespace + "." + varReference.name : providedNamespace;
+      return { name: providedName, namespace, filePath: this.filePath };
+    } else {
+      const varReference = this.#variables.find(v => v.declarationName == providedName);
+      const namespace = varReference?.namespace ?? providedNamespace;
+      const name = varReference?.name ?? providedName;
+      return {name, namespace, filePath: this.filePath};
     }
-    s.add(currentModule + "." + name);
-    s.add(name); // For builtins like hack.
   }
+}
 
-  //A list of identifiers that resolve to "native Javascript code"
-  const objectPrototypeProperties = Object.getOwnPropertyNames(Object.prototype);
 
-  // If we discover a dependency identifier, state.key is the dependent identifier.
-  // walkDeeper is for doing recursive walks of expressions in composites that we handle.
-  function commonVisitors(): any {
-    return {
-      Identifier: (node: any, st: any) => {
-        if (objectPrototypeProperties.includes(node.name)) {
-          return;
-        }
-        addRef(st.key, node.name);
-      },
-      WhileStatement: (node: any, st: any, walkDeeper: any) => {
-        addRef(st.key, specialReferenceWHILE);
-        node.test && walkDeeper(node.test, st);
-        node.body && walkDeeper(node.body, st);
-      },
-      DoWhileStatement: (node: any, st: any, walkDeeper: any) => {
-        addRef(st.key, specialReferenceWHILE);
-        node.test && walkDeeper(node.test, st);
-        node.body && walkDeeper(node.body, st);
-      },
-      ForStatement: (node: any, st: any, walkDeeper: any) => {
-        addRef(st.key, specialReferenceFOR);
-        node.init && walkDeeper(node.init, st);
-        node.test && walkDeeper(node.test, st);
-        node.update && walkDeeper(node.update, st);
-        node.body && walkDeeper(node.body, st);
-      },
-      IfStatement: (node: any, st: any, walkDeeper: any) => {
-        addRef(st.key, specialReferenceIF);
-        node.test && walkDeeper(node.test, st);
-        node.consequent && walkDeeper(node.consequent, st);
-        node.alternate && walkDeeper(node.alternate, st);
-      },
-      MemberExpression: (node: any, st: any, walkDeeper: any) => {
-        node.object && walkDeeper(node.object, st);
-        node.property && walkDeeper(node.property, st);
-      },
-    };
-  }
-
-  walk.recursive(
-    ast,
-    { key: globalKey },
-    Object.assign(
-      {
-        ImportDeclaration: (node: any, st: any) => {
-          const importModuleName = node.source.value;
-          additionalModules.push(importModuleName);
-
-          // This module's global scope refers to that module's global scope, no matter how we
-          // import it.
-          const set = dependencyMap[st.key];
-          if (set === undefined) throw new Error("set should not be undefined");
-          set.add(importModuleName + memCheckGlobalKey);
-
-          for (let i = 0; i < node.specifiers.length; ++i) {
-            const spec = node.specifiers[i];
-            if (spec.imported !== undefined && spec.local !== undefined) {
-              // We depend on specific things.
-              internalToExternal[spec.local.name] = importModuleName + "." + spec.imported.name;
-            } else {
-              // We depend on everything.
-              const set = dependencyMap[st.key];
-              if (set === undefined) throw new Error("set should not be undefined");
-              set.add(importModuleName + ".*");
-            }
-          }
-        },
-        FunctionDeclaration: (node: any) => {
-          // node.id will be null when using 'export default'. Add a module name indicating the default export.
-          const key = currentModule + "." + (node.id === null ? "__SPECIAL_DEFAULT_EXPORT__" : node.id.name);
-          walk.recursive(node, { key: key }, commonVisitors());
-        },
-      },
-      commonVisitors(),
-    ),
-  );
-
-  return { dependencyMap: dependencyMap, additionalModules: additionalModules };
+/**
+ * A more complete definition of the Acorn Node - which represents a node in the JavaScript AST -
+ * with various field that Acorn omits. Note that they aren't all present on all node types, but
+ * without either building a full type structure for Acorn, or giving up and using "any" for
+ * everything, we can't do much better.
+ */
+interface FullNode extends acorn.Node {
+  name: string;
+  // Present on function invocations
+  callee: FullNode;
+  // Present on function callees
+  object: FullNode;
+  property: FullNode;
+  // Present on anything with a body, like functions, classes, blocks
+  body: FullNode;
+  // Present on variable declarators
+  init: FullNode;
+  elements: FullNode[];
+  // Present on return values
+  argument: FullNode;
+  // Present on import specifiers
+  imported: FullNode;
+  local: FullNode;
+  // Present on function declarations
+  id: FullNode;
+  params: FullNode[];
+  // Present on import nodes
+  source: FullNode;
+  specifiers: FullNode[];
+  value: string;
 }
 
 /**
- * Calculate's a scripts RAM Usage
- * @param {string} codeCopy - The script's code
- * @param {Script[]} otherScripts - All other scripts on the server.
- *                                  Used to account for imported scripts
+ * Record all the functions defined in a single Netscript file, and all the functions that is invoked
+ * in turn by those functions, and the other libraries imported by the script.
+ *
+ * This allows us to follow the trail of functions to find all that are potentially executed from one
+ * starting point, so the cost of each executed NS function can be calculated.
  */
-export async function calculateRamUsage(
-  player: IPlayer,
-  codeCopy: string,
-  otherScripts: Script[],
-): Promise<RamCalculation> {
-  // We don't need a real WorkerScript for this. Just an object that keeps
-  // track of whatever's needed for RAM calculations
-  const workerScript = {
-    loadedFns: {},
-    env: {
-      vars: RamCosts,
-    },
-  } as WorkerScript;
+export class NetscriptFileParser {
+  constructor(readonly filePath: string) { }
 
-  try {
-    return await parseOnlyRamCalculate(player, otherScripts, codeCopy, workerScript);
-  } catch (e) {
-    console.error(`Failed to parse script for RAM calculations:`);
-    console.error(e);
-    return { cost: RamCalculationErrorCode.SyntaxError };
+  parseScript(code: string): ParsedModule {
+    const ast = parse(code, { sourceType: "module", ecmaVersion: "latest" });
+    const state = new TopLevelParseState(this.filePath);
+    walk.recursive(ast, state, this.topLevelParsing());
+    return state.toParseResults();
   }
 
-  return { cost: RamCalculationErrorCode.SyntaxError };
+  /**
+   * Within a function declaration or class declaration, record calls made to other functions.
+   */
+  withinBlockParsing(): RecursiveVisitors<TState> {
+    let visitor: (RecursiveVisitors<TState> | null) = null;
+    const recordFunctionCalls = (node: FullNode, state: WithinFunctionParseState): void => {
+      // This deals with function names like "doHack", then "ns.hacknet.doHack", then "ns.doHack", and "SomeClass.doHack"
+      const [fnName, fnNamespace] = (node.callee.name) ? [node.callee.name, ""] :
+        (node.callee?.object?.object?.name) ? [node.callee.property.name, node.callee.object.object.name +"."+node.callee.object.property.name] :
+        [node.callee.property.name, node.callee?.object?.name ?? node.callee?.object?.callee?.name ?? ""];
+      state.recordFunctionCall(fnName, fnNamespace);
+      // The function call may have content within it - e.g. "new Hacker(ns).doHacking()" is a CallExpression containing a NewExpression
+      walk.recursive(node.callee, state, visitor as RecursiveVisitors<TState>);
+    }
+
+    const recordReference = (node: FullNode, state: WithinFunctionParseState): void => {
+      const subType = node.init.type;
+      if (subType!="ArrayExpression" && subType!="MemberExpression") {
+        walk.recursive(node.init, state, visitor as RecursiveVisitors<TState>);
+        return;
+      }
+
+      const names = node.id?.name ? [node.id.name] :  node.id.elements.map(n => n.name);
+      if (node.init.property) {
+        const [fnName, fnNamespace] = [node.init.property.name, node.init.object?.name ?? node.init.object?.object?.name+"."+node.init.object?.property?.name ?? ""];
+        state.recordVariable(names[0], fnName, fnNamespace);
+      } else {
+        node.init.elements.map((el, count) => {
+          const [fnName, fnNamespace] = [el.property.name, el.object?.name ?? ""];
+          const declarationName = names[count];
+          state.recordVariable(declarationName, fnName, fnNamespace);
+        });
+      }
+    }
+
+    const recordReturn = (node: FullNode, state: WithinFunctionParseState): void => {
+      const [fnName, fnNamespace] = [node.argument.property.name, node.argument.object?.name ?? node.argument.object?.object?.name+"."+node.argument.object?.property?.name ?? ""];
+      state.recordReturn(fnName, fnNamespace);
+    }
+
+    visitor = Object.assign({
+      CallExpression: recordFunctionCalls,
+      NewExpression: recordFunctionCalls,
+      VariableDeclarator: recordReference,
+      ReturnStatement: recordReturn,
+    })
+    return visitor as RecursiveVisitors<TState>;
+  }
+
+  /**
+   * At the top level of a script file, record imports (so we know where else to go)
+   * and class/function declarations (so we know what gets defined and invoked).
+   */
+  topLevelParsing(): RecursiveVisitors<TState> {
+    const parseImport = (node: FullNode, state: TopLevelParseState): void => {
+      const sourcePath = node.source.value;
+      // Support either "import * as X from 'lib'" or "import { x, y } from 'lib'"
+      const isImportAll = !node.specifiers.at(0)?.imported;
+      if (isImportAll) {
+        const alias = node.specifiers.at(0)?.local.name ?? "";
+        state.recordImport(sourcePath, alias, ["*"]);
+      } else {
+        const imports = node.specifiers.map(n => n.imported.name);
+        state.recordImport(sourcePath, "", imports);
+      }
+    };
+
+    const parseFunctionOrClass = (node: FullNode, state: TopLevelParseState): void => {
+      const fnName = node.id.name;
+      const fnState = new WithinFunctionParseState(fnName, "", this.filePath);
+      walk.recursive(node.body, fnState, this.withinBlockParsing())
+      state.recordFunction(fnState.endFunction());
+    }
+
+    return Object.assign({
+      ImportDeclaration: parseImport,
+      FunctionDeclaration: parseFunctionOrClass,
+      ClassDeclaration: parseFunctionOrClass,
+    });
+  }
+}
+
+
+/**
+ * Parse an initial script, and all the scripts that are connected to it via imports, to form a list of ParseResults
+ * that describe all the functions and classes that are defined or called from those scripts.
+ */
+export class InvocationTreeBuilder {
+  #parsedModules: ParsedModule[] = [];
+
+  async parseAll(initialCode: string, otherScripts: Script[]): Promise<ParsedModule[]> {
+    const result = InvocationTreeBuilder.parse(initialCode, "");
+    this.#parsedModules.push(result);
+
+    const modulesToParse: string[] = _.uniq(result.importedModules.map(m => m.filePath));
+    const alreadyParsedModulesFn = (): string[] => this.#parsedModules.map(m => m.filePath);
+    while (modulesToParse.length > 0) {
+      const pathToParse = modulesToParse.shift() as string;
+      const normalizedPath = pathToParse.startsWith("./") ? pathToParse.slice(2) : pathToParse;
+
+      if (alreadyParsedModulesFn().includes(normalizedPath)) { continue; }
+
+      let code = null;
+      if (pathToParse.startsWith("https://") || pathToParse.startsWith("http://")) {
+        // eslint-disable-next-line no-await-in-loop
+        code = await InvocationTreeBuilder.resolveExternalModule(pathToParse);
+      } else {
+        code = otherScripts.find(s => areImportsEquals(s.filename, normalizedPath))?.code;
+      }
+      if (code==null) throw new RamCalculationException(RamCalculationErrorCode.ImportError, `Imported module ${normalizedPath} can't be found`);
+
+      const result = InvocationTreeBuilder.parse(code, normalizedPath);
+      this.#parsedModules.push(result);
+      modulesToParse.push(...result.importedModules.map(m => m.filePath));
+    }
+
+    return this.#parsedModules;
+  }
+
+  private static parse(code: string, filePath: string): ParsedModule {
+    const p = new NetscriptFileParser(filePath);
+    return p.parseScript(code);
+  }
+
+  private static async resolveExternalModule(moduleUrl: string): Promise<string> {
+    try {
+      const module = await eval("import(moduleUrl)");
+      let code = "";
+      for (const prop in module) {
+        if (typeof module[prop] === "function") {
+          code += module[prop].toString() + ";\n";
+        }
+      }
+      return code;
+    } catch (e) {
+      const errorMsg = `Error dynamically importing module from ${moduleUrl} for RAM calculations: ${e}`;
+      console.error(errorMsg);
+      throw new RamCalculationException(RamCalculationErrorCode.URLImportError, errorMsg);
+    }
+  }
+}
+
+type FunctionCalls = { resolvedFunctions: DefinedFunction[]; unresolvedFunctions: DefinedFunction[] };
+
+
+/**
+ * Given an initial function, find all the functions that are called transitively starting from that function, returning them
+ * as either "resolvedFunctions" that we have the definition for, or "unresolvedFunctions" for which we have no definition.
+ */
+export function findAllCalledFunctions(modules: ParsedModule[], entryPoint: DefinedFunction = {name: "main", namespace: "", filePath: ""}): FunctionCalls {
+  const resolvedFunctions: DefinedFunction[] = [];
+  const unresolvedFunctions: DefinedFunction[] = [];
+  const isAlreadyProcessed = (newFn: DefinedFunction): boolean => !!resolvedFunctions.find(cf => _.isEqual(newFn, cf)) || !!unresolvedFunctions.find(cf => _.isEqual(newFn, cf));
+
+  const toProcess: DefinedFunction[] = [entryPoint];
+  while (toProcess.length > 0) {
+    // Get the definition of the function
+    const current = toProcess.shift() as DefinedFunction;
+    const currentModule = modules.find(m => m.filePath==current.filePath) as ParsedModule;
+    if (!currentModule) continue;
+
+    // The function being called may be in the current file, or it may be imported from another module, or it may not be defined (e.g. it is an NS API function)
+    const fnFromCurrentFile = currentModule?.functionTree.find(ft => _.isEqual(ft.fn, current) );
+    let currentFn = null;
+    if (fnFromCurrentFile!=null) {
+      currentFn = fnFromCurrentFile;
+    } else {
+      // Check the imports for the current module to find where the function comes from
+      const importReference = currentModule.importedModules.find(m => m.alias==current.namespace && (m.imports.includes(current.name) || m.imports.includes("*")) );
+      const importModule = modules.find(m => m.filePath == importReference?.filePath);
+      currentFn = importModule?.functionTree.find(ft => ft.fn.name==current.name && ft.fn.namespace=="" );
+    }
+
+    if (currentFn) {
+      // The function could be resolved to a definition elsewhere in the scripts - so record it and find its onward dependencies
+      const dependencies = currentFn?.calledFunctions ?? [];
+      const newDependencies = dependencies.filter(d => !isAlreadyProcessed(d));
+      resolvedFunctions.push(current);
+      newDependencies.forEach(d => toProcess.push(d));
+    } else {
+      // The function could not be resolved - which probably means it's an NS API function like ns.hack
+      unresolvedFunctions.push(current);
+    }
+  }
+  return {resolvedFunctions, unresolvedFunctions};
+}
+
+
+function calculateRamCost(player: IPlayer, functions: DefinedFunction[]): RamCalculation {
+  const specialKeyChecks: RamUsageEntry[] = [
+    {type: "ns", cost: RamCostConstants.ScriptHacknetNodesRamCost, name: "ns.hacknet"},
+    {type: "dom", cost: RamCostConstants.ScriptDomRamCost, name: "document"},
+    {type: "dom", cost: RamCostConstants.ScriptDomRamCost, name: "window"},
+    {type: "ns", cost: RamCostConstants.ScriptCorporationRamCost, name: "ns.corporation"},
+  ];
+
+  const uniqueFunctions = _.uniqWith(functions, _.isEqual);
+  const entries: RamUsageEntry[] = uniqueFunctions.map(fn => {
+    const specialCost = specialKeyChecks.find(sk => fn.namespace==sk.name);
+    if (specialCost) return specialCost;
+    const splitNamespace = fn.namespace.split(".");
+
+    // This may be a number... or it may be a function, because singularity functions change cost depending on the player's source files
+    let cost: (number | {(p: IPlayer): number});
+    if (splitNamespace.length>1) {
+      const libPart = splitNamespace.at(-1) as string;
+      cost = RamCosts[libPart][fn.name] ?? 0;
+    } else {
+      cost = RamCosts[fn.name];
+    }
+    const actualCost = (typeof cost === "function") ? cost(player) : cost;
+    return { type: "ns", name: fn.name, cost: actualCost };
+  });
+
+  const baseCost: RamUsageEntry = { type: 'misc', name: 'baseCost', cost: RamCostConstants.ScriptBaseRamCost};
+  const entriesWithBase = [baseCost, ...entries]
+  const cost = _.sum( entriesWithBase.map(r => r.cost ));
+  return { cost, entries };
+}
+
+class RamCalculationException {
+  constructor(readonly code: RamCalculationErrorCode, readonly message?: string) {}
+}
+
+
+export async function calculateRamUsage(player: IPlayer, codeCopy: string, otherScripts: Script[]): Promise<RamCalculation> {
+  // try {
+    const parseResults = await new InvocationTreeBuilder().parseAll(codeCopy, otherScripts);
+    const allCalledFunctions = findAllCalledFunctions(parseResults)
+    return calculateRamCost(player, allCalledFunctions.unresolvedFunctions);
+  // } catch (error: any) {
+  //   const errorCode = error?.code ?? RamCalculationErrorCode.SyntaxError;
+  //   return { cost: errorCode };
+  // }
 }
